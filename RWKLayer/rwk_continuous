@@ -1,0 +1,325 @@
+### A Pluto.jl notebook ###
+# v0.19.27
+
+using Markdown
+using InteractiveUtils
+
+# ╔═╡ a0936f30-ff65-11ed-352c-c795c803f250
+begin
+	import Pkg
+	Pkg.activate()
+	using MolecularGraph, MolecularGraphKernels, Test, MetaGraphs, Graphs, ProfileCanvas, PlutoUI, BenchmarkTools, GeometricFlux, Flux, Functors, Zygote, LinearAlgebra, Plots, CUDA
+end
+
+# ╔═╡ 128f77d4-96e4-4442-bd02-338e04ae0ad8
+Flux.CUDA.set_runtime_version!("12.1")
+
+# ╔═╡ b1a5c617-9543-4294-a557-f735d5ac7365
+CUDA.versioninfo()
+
+# ╔═╡ 7ea77cb0-7037-4a24-9799-1e94fb2219aa
+begin
+        #g₁, g₂ = smilestomol.(["NC=O", "CN(C=O)C=O"])
+        #l = 4
+        #x = random_walk(GraphMatrix{Direct}(g₁, g₂); l=l)
+        #@test x == 74
+        #@test x == random_walk(ProductGraph{Direct}(g₁, g₂); l=l)
+        #@test x == random_walk(g₁, g₂; l=l)
+
+        g₁ = MetaGraph(removehydrogens(smilestomol("C[C@H]1[C@H](O)[C@@H](O)[C@@H](O)[C@@H](O1)O[C@H](C2=O)[C@H](c(c3)ccc(O)c3O)Oc(c24)cc(O)cc4O")))
+        g₂ = MetaGraph(removehydrogens(smilestomol("O[C@@H](O1)[C@H](O)[C@@H](O)[C@H](O)[C@H]1CO[C@@H](O2)[C@H](O)[C@@H](O)[C@@H](O)[C@H]2CO")))
+        dpg = ProductGraph{Direct}(g₁, g₂)
+end
+
+# ╔═╡ 433d45a2-e8be-44a4-b993-b4852c46546d
+begin
+	adjm = [0 1 0 1;
+            1 0 1 1;
+            0 1 0 1;
+            1 1 1 0];
+
+ nf = [1 0 0 1
+ 	   0 1 0 0
+ 	   0 0 1 0]
+ nf_norm = (nf'./sum.(eachrow(nf')))'
+ ef = [1 0 0 1 1 
+ 	   0 1 0 0 0 
+ 	   0 0 1 0 0 ]
+ ef_norm = (ef'./sum.(eachrow(ef')))'
+
+ fg = FeaturedGraph(Float32.(adjm); nf=Float32.(nf_norm), ef=Float32.(ef_norm))
+
+end
+
+# ╔═╡ 97888b1f-36bc-4731-b261-b863bb7e7e03
+begin
+	function split_adjacency(g,edge_labels)
+		nv = size(g)[1]
+		nt = length(edge_labels)
+		adj_layers = zeros(nv, nv, nt+1)
+		adj_layers[:,:,nt+1] = ones(nv,nv).-Matrix{Float32}(I, nv, nv)
+		for l ∈ eachindex(edge_labels)
+			for edge ∈ edges(g)
+				if get_prop(g, edge, :label) == edge_labels[l]
+					adj_layers[src(edge),dst(edge),l] = 1.0
+					adj_layers[src(edge),dst(edge),nt+1] = 0
+				end
+			end
+			adj_layers[:,:,l] = adj_layers[:,:,l]+adj_layers[:,:,l]'
+		end
+		
+		return adj_layers
+	end
+	
+	function split_adjacency(g::AbstractFeaturedGraph)::Array{Float32}
+		ef = fg.ef.signal
+		nv = size(fg.nf.signal)[2]
+		ne = size(ef)[2]
+		nt = size(ef)[1]
+		edge_array = [edge for edge ∈ edges(fg)][1:ne]
+		adj_layers = zeros(Float32, nv, nv, nt+1)
+		adj_layers[:,:,nt+1] = ones(nv,nv).-Matrix{Float32}(I, nv, nv)
+		for edge_idx ∈ eachindex(edge_array)
+			v₁,v₂ = edge_array[edge_idx][2]
+
+			adj_layers[v₁,v₂,1:nt] .= ef[:,edge_idx]
+			adj_layers[v₂,v₁,1:nt] .= ef[:,edge_idx]
+			
+			adj_layers[v₂,v₁,nt+1] = 0
+			adj_layers[v₁,v₂,nt+1] = 0
+		end
+		return adj_layers
+	end
+end
+
+# ╔═╡ 376b18e1-8b9f-4103-a5c9-78e1ea85c082
+function rwk_kron(g₁,g₂;l=1)
+	
+	edge_labels = unique(
+		[get_prop(g₁, edge, :label) for edge ∈ edges(g₁)]
+		∪
+		[get_prop(g₂, edge, :label) for edge ∈ edges(g₂)]
+	)
+	
+	vertex_labels = unique(
+		[get_prop(g₁, v, :label) for v ∈ vertices(g₁)]
+		∪
+		[get_prop(g₂, v, :label) for v ∈ vertices(g₂)]
+	)
+	
+	A₁ = split_adjacency(g₁,edge_labels)
+	A₂ = split_adjacency(g₂,edge_labels)
+	
+	X₁ = zeros(size(g₁)[1],length(vertex_labels))
+	X₂ = zeros(size(g₂)[1],length(vertex_labels))
+	
+	for i ∈ eachindex(vertices(g₁))
+		X₁[i,:] = vertex_labels.==get_prop(g₁, i, :label)
+	end
+	
+	for i ∈ eachindex(vertices(g₂))
+		X₂[i,:] = vertex_labels.==get_prop(g₂, i, :label)
+	end
+
+
+	return sum((vec(X₁*X₂')*vec(X₁*X₂')'.*sum([kron(A₂[:,:,i],A₁[:,:,i]) for i ∈ eachindex(edge_labels)]))^l)
+	
+end
+	
+
+# ╔═╡ 2f3098ae-a36e-4d90-8241-32fe70259cb6
+rwk_kron(g₁,g₂;l=5)
+
+# ╔═╡ 3370544e-76fb-4b15-b59a-1cae00d2e514
+MolecularGraphKernels.random_walk(ProductGraph{Direct}(g₁, g₂); l=5)
+
+# ╔═╡ b5065dc1-721f-45f9-933c-b4a723403352
+begin
+	X = nf'
+	X_2_norm = nf'
+	A = split_adjacency(fg)
+	A_2 = split_adjacency(fg)
+	sum((vec(X*X_2_norm')*vec(X*X_2_norm')'.*sum([kron(A_2[:,:,i],A[:,:,i]) for i ∈ 1:3]))^4)
+end
+
+# ╔═╡ aaa6cd0f-b37d-4228-82ad-df39e0ac17bd
+function triangle_dl_mx(A)
+	sz = size(A)[1]
+	depth = size(A)[3]
+	mx = zeros(Float32, sz,sz,depth)
+	for i = 1:sz
+		for j = 1:sz
+			if j>i && sum(A[i,j,:]) != 0
+				mx[i,j,:] .= 1/sum(A[i,j,:])
+			end
+		end
+	end
+	return mx
+end
+
+# ╔═╡ 84e3bd33-cdc4-43cf-8e93-953c01184d64
+function self_loop_delete_mx(d_1,d_2,d_3)
+	return stack([ones(Float32, d_1, d_2).-Matrix{Float32}(I, d_1, d_2) for i ∈ 1:d_3])
+end
+
+# ╔═╡ 2a77361d-4872-4aa2-b63a-2d367bd16ec4
+begin
+	struct KGNN <: AbstractGraphLayer
+	    A_2 ::Array{Float32}#Adjacency matrix of hidden graph
+		X_2 ::Matrix{Float32}#Node features of hidden graph
+		num_edge_types ::Int64 #Number of edge labels
+		p ::Int64#Walk length hyperparameter
+	    σ 
+	end
+	
+	@functor KGNN
+
+	function (l::KGNN)(A, X, A_norm_mx)::Float32
+
+		nv = size(l.A_2)[1]
+		
+		n_edge_types = size(l.A_2)[3]
+		
+		A_2_herm = stack([(relu.(tanh.(l.A_2)).*A_norm_mx)[:,:,i]+((relu.(tanh.(l.A_2)).*A_norm_mx)[:,:,i])' for i ∈ 1:n_edge_types])
+		
+		A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+Matrix{Float64}(I, nv, nv) for i ∈ 1:n_edge_types])
+		
+		A_2_norm = A_2_herm./A_2_adj
+		
+		X_2_norm = relu.(l.X_2)./sum([relu.(l.X_2)[:,i] for i ∈ 1:l.num_edge_types])
+
+		return sum((vec(X*X_2_norm')*vec(X*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)/(sum((vec(X*X')*vec(X*X')'.*sum([kron(A[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)*sum((vec(X_2_norm*X_2_norm')*vec(X_2_norm*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A_2_norm[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p))^.5
+	
+	end
+
+	#function (l::KGNN)(A::AbstractArray, X::AbstractMatrix, slf_dl_mx)
+
+		#nv = size(l.A_2)[1]
+		
+		#n_edge_types = size(l.A_2)[3]
+		
+		#A_2_herm = stack([((relu.(l.A_2).*slf_dl_mx)[:,:,i].+((relu.(l.A_2).*slf_dl_mx)[:,:,i])')./2 for i ∈ 1:n_edge_types])
+		
+		#A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+Matrix{Float64}(I, nv, nv) for i ∈ 1:n_edge_types])
+		
+		#A_2_norm = A_2_herm./A_2_adj
+		
+		#X_2_norm = relu.(l.X_2)./sum([relu.(l.X_2)[:,i] for i ∈ 1:l.num_edge_types])
+
+		#return sum((vec(X*X_2_norm')*vec(X*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)/(sum((vec(X*X')*vec(X*X')'.*sum([kron(A[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)*sum((vec(X_2_norm*X_2_norm')*vec(X_2_norm*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A_2_norm[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p))^.5
+	
+	#end
+
+	function (l::KGNN)(fg::AbstractFeaturedGraph)::Float32
+		nf = node_feature(fg)
+		ef = edge_feature(fg)
+	    Ã = Zygote.ignore() do
+	        split_adjacency(fg)
+	    end
+		A_norm_mx = Zygote.ignore() do
+	        triangle_dl_mx(l.A_2)
+	    end
+		slf_dl_mx = Zygote.ignore() do
+			self_loop_delete_mx(size(l.A_2)...)
+	    end
+	    return l(Ã, copy(nf'),A_norm_mx)
+	end
+end
+
+# ╔═╡ 863ae18c-eb5e-45ab-ac0a-6ba0363a5603
+begin
+	model = KGNN(Float32.(rand(4,4, 4)), Float32.(rand(4,3)), 3, 4, relu)
+	optim = Flux.setup(Flux.Descent(1), model)
+	losses = []
+	loss = []
+	for epoch in 1:2000
+		loss, grads = Flux.withgradient(model) do m
+			
+			# Evaluate model and loss inside gradient context:
+			ker_norm = m(fg)
+			1-ker_norm
+		end
+		Flux.update!(optim, model, grads[1])
+		push!(losses, loss)  # logging, outside gradient context
+	end
+end
+
+
+# ╔═╡ 35ed4380-8cf0-4193-9c9a-d497f0af344d
+plot(losses)
+
+# ╔═╡ 1107ffd6-347e-4c4b-bd56-e35cc445e8e1
+model(fg)
+
+# ╔═╡ 319b6b2f-0b17-4123-8c54-895db1ec2bf7
+begin
+	A_norm_mx = triangle_dl_mx(model.A_2)
+	
+	nv = size(model.A_2)[1]
+		
+	n_edge_types = size(model.A_2)[3]
+		
+	A_2_herm = stack([(relu.(tanh.(model.A_2)).*A_norm_mx)[:,:,i]+((relu.(tanh.(model.A_2)).*A_norm_mx)[:,:,i])' for i ∈ 1:n_edge_types])
+		
+	A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+Matrix{Float64}(I, nv, nv) for i ∈ 1:n_edge_types])
+		
+	A_2_norm = A_2_herm./A_2_adj
+end
+
+# ╔═╡ fd430464-1093-47b7-be83-d0fe14a87547
+relu.(model.X_2)./sum([relu.(model.X_2)[:,i] for i ∈ 1:model.num_edge_types])
+
+# ╔═╡ 000a1031-fbfe-4891-a565-64d627a37a6d
+split_adjacency(fg)
+
+# ╔═╡ 8294c34a-f1a2-4571-8199-e78a41c22825
+X
+
+# ╔═╡ 07135b44-02cc-4813-bf36-4f3faf1a1f03
+begin
+	graph_size = 6
+	n_edge_types_model = 3
+	p = 4
+	n_hidden_graphs = 12
+	nn = Chain(
+		Parallel(vcat, 
+			[KGNN(rand(Float32,graph_size,graph_size, n_edge_types_model+1), rand(Float32,graph_size,n_edge_types_model), n_edge_types_model, p, relu) for i ∈ 1:n_hidden_graphs]...
+		),
+		Dense(n_hidden_graphs => 8, tanh),
+	    Dense(8 => 8, tanh),
+		Dropout(0.2),
+		Dense(8 => 2, tanh),
+	    softmax
+	)
+end
+
+# ╔═╡ 7ec7d23e-f64f-45b2-ab9e-5f78f40d2e57
+nn(fg |> gpu) |> cpu
+
+# ╔═╡ 73c65e4e-6fb7-4af4-bf77-955da30d1855
+
+
+# ╔═╡ Cell order:
+# ╠═a0936f30-ff65-11ed-352c-c795c803f250
+# ╠═128f77d4-96e4-4442-bd02-338e04ae0ad8
+# ╠═b1a5c617-9543-4294-a557-f735d5ac7365
+# ╠═7ea77cb0-7037-4a24-9799-1e94fb2219aa
+# ╠═97888b1f-36bc-4731-b261-b863bb7e7e03
+# ╠═433d45a2-e8be-44a4-b993-b4852c46546d
+# ╠═376b18e1-8b9f-4103-a5c9-78e1ea85c082
+# ╠═2f3098ae-a36e-4d90-8241-32fe70259cb6
+# ╠═3370544e-76fb-4b15-b59a-1cae00d2e514
+# ╠═2a77361d-4872-4aa2-b63a-2d367bd16ec4
+# ╠═b5065dc1-721f-45f9-933c-b4a723403352
+# ╠═aaa6cd0f-b37d-4228-82ad-df39e0ac17bd
+# ╠═84e3bd33-cdc4-43cf-8e93-953c01184d64
+# ╠═863ae18c-eb5e-45ab-ac0a-6ba0363a5603
+# ╠═35ed4380-8cf0-4193-9c9a-d497f0af344d
+# ╠═1107ffd6-347e-4c4b-bd56-e35cc445e8e1
+# ╠═319b6b2f-0b17-4123-8c54-895db1ec2bf7
+# ╠═fd430464-1093-47b7-be83-d0fe14a87547
+# ╠═000a1031-fbfe-4891-a565-64d627a37a6d
+# ╠═8294c34a-f1a2-4571-8199-e78a41c22825
+# ╠═07135b44-02cc-4813-bf36-4f3faf1a1f03
+# ╠═7ec7d23e-f64f-45b2-ab9e-5f78f40d2e57
+# ╠═73c65e4e-6fb7-4af4-bf77-955da30d1855
