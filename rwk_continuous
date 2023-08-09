@@ -12,10 +12,13 @@ begin
 end
 
 # ╔═╡ 643fcfc0-f38b-4f18-954d-4355e840b032
-device = gpu
+device = cpu
 
 # ╔═╡ 128f77d4-96e4-4442-bd02-338e04ae0ad8
+# ╠═╡ disabled = true
+#=╠═╡
 Flux.CUDA.set_runtime_version!("12.1")
+  ╠═╡ =#
 
 # ╔═╡ b1a5c617-9543-4294-a557-f735d5ac7365
 CUDA.versioninfo()
@@ -53,7 +56,7 @@ begin
 		
 		return adj_layers
 	end
-	
+	# converts R^2 adjacency matrix into an R^3 array where each layer is an adjacency matrix for only one edge feature
 	function split_adjacency(fg::AbstractFeaturedGraph)::Array{Float32}
 		ef = fg.ef.signal
 		nv = size(fg.nf.signal)[2]
@@ -232,10 +235,10 @@ end
 begin
 	A_2 = Float32.(rand(4,4, 4))
 	model = KGNN(A_2, Float32.(rand(4,3)), 3, 4, relu, upper_triang(4)) |> device
-	optim = Flux.setup(Flux.Descent(1), model)
+	optim = Flux.setup(Flux.Momentum(1, 0.5), model)
 	losses = []
 	loss = []
-	for epoch in 1:500
+	for epoch in 1:300
 		loss, grads = Flux.withgradient(model) do m
 			
 			# Evaluate model and loss inside gradient context:
@@ -297,14 +300,17 @@ begin
 		Dropout(0.2),
 		Dense(8 => 2, tanh),
 	    softmax
-	) |> cpu
+	) |> device
 end
 
 # ╔═╡ 45581b00-630a-49ae-a412-cb03dbdac925
 fg |> device
 
 # ╔═╡ 7ec7d23e-f64f-45b2-ab9e-5f78f40d2e57
-nn(fg |> cpu) |> cpu
+nn(fg |> device) |> cpu
+
+# ╔═╡ b76eb4a6-d062-4cb9-b3a6-73914b08c20a
+
 
 # ╔═╡ Cell order:
 # ╠═a0936f30-ff65-11ed-352c-c795c803f250
@@ -325,10 +331,11 @@ nn(fg |> cpu) |> cpu
 # ╠═35ed4380-8cf0-4193-9c9a-d497f0af344d
 # ╠═5f8872b1-838f-4c21-814c-f0eaee9da8ac
 # ╠═1107ffd6-347e-4c4b-bd56-e35cc445e8e1
-# ╟─319b6b2f-0b17-4123-8c54-895db1ec2bf7
+# ╠═319b6b2f-0b17-4123-8c54-895db1ec2bf7
 # ╟─fd430464-1093-47b7-be83-d0fe14a87547
 # ╟─000a1031-fbfe-4891-a565-64d627a37a6d
 # ╟─8294c34a-f1a2-4571-8199-e78a41c22825
 # ╠═07135b44-02cc-4813-bf36-4f3faf1a1f03
 # ╠═45581b00-630a-49ae-a412-cb03dbdac925
 # ╠═7ec7d23e-f64f-45b2-ab9e-5f78f40d2e57
+# ╠═b76eb4a6-d062-4cb9-b3a6-73914b08c20a
