@@ -8,7 +8,7 @@ using InteractiveUtils
 begin
 	import Pkg
 	Pkg.activate()
-	using MolecularGraph, MolecularGraphKernels, Test, MetaGraphs, Graphs, ProfileCanvas, PlutoUI, BenchmarkTools, GeometricFlux, Flux, Functors, Zygote, LinearAlgebra, Plots, CUDA
+	using MolecularGraph, MolecularGraphKernels, Test, MetaGraphs, Graphs, ProfileCanvas, PlutoUI, BenchmarkTools, Flux, Functors, Zygote, LinearAlgebra, Plots, CUDA, JLD2, GeometricFlux, Kronecker
 end
 
 # ╔═╡ 643fcfc0-f38b-4f18-954d-4355e840b032
@@ -42,13 +42,14 @@ begin
 	function split_adjacency(g,edge_labels)
 		nv = size(g)[1]
 		nt = length(edge_labels)
-		adj_layers = zeros(nv, nv, nt+1)
+		adj_layers = zeros(Float32,nv, nv, nt+1)
 		adj_layers[:,:,nt+1] = ones(nv,nv).-Matrix{Float32}(I, nv, nv)
 		for l ∈ eachindex(edge_labels)
 			for edge ∈ edges(g)
 				if get_prop(g, edge, :label) == edge_labels[l]
 					adj_layers[src(edge),dst(edge),l] = 1.0
 					adj_layers[src(edge),dst(edge),nt+1] = 0
+					adj_layers[dst(edge),src(edge),nt+1] = 0
 				end
 			end
 			adj_layers[:,:,l] = adj_layers[:,:,l]+adj_layers[:,:,l]'
@@ -86,12 +87,12 @@ begin
             1 1 1 0];
 
 	nf = [1 0 0 1
-	 	   0 1 0 0
-	 	   0 0 1 0]
+	 	  0 1 0 0
+	      0 0 1 0]
 	nf_norm = (nf'./sum.(eachrow(nf')))'
 	ef = [1 0 0 1 1 
-	 	   0 1 0 0 0 
-	 	   0 0 1 0 0 ]
+	 	  0 1 0 0 0 
+	 	  0 0 1 0 0 ]
 	ef_norm = (ef'./sum.(eachrow(ef')))'
 	
 	fg = FeaturedGraph(Float32.(adjm); nf=Float32.(nf_norm), ef=Float32.(ef_norm))
@@ -190,8 +191,8 @@ begin
 	KGNNLayer(num_nodes, num_node_types, num_edge_types, p) = KGNN(
 		Float32.(rand(num_nodes, num_nodes, num_edge_types+1)), 
 		Float32.(rand(num_nodes,num_node_types)), 
-		num_edge_types, 
-		p, 
+		Int(num_edge_types), 
+		Int(p), 
 		relu, 
 		upper_triang(num_nodes)
 	)
@@ -214,11 +215,12 @@ begin
 		
 		X_2_norm = relu.(l.X_2)./sum([relu.(l.X_2)[:,i] for i ∈ 1:l.num_edge_types])
 
+
 		return sum((vec(X*X_2_norm')*vec(X*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)/(sum((vec(X*X')*vec(X*X')'.*sum([kron(A[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)*sum((vec(X_2_norm*X_2_norm')*vec(X_2_norm*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A_2_norm[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p))^.5
 	
 	end
 	
-	function (l::KGNN)(fg::AbstractFeaturedGraph)::Float32
+	function (l::KGNN)(fg::AbstractFeaturedGraph)
 	    return l(global_feature(fg), node_feature(fg)')
 	end
 end
@@ -284,33 +286,147 @@ split_adjacency(fg |> cpu)
 # ╔═╡ 8294c34a-f1a2-4571-8199-e78a41c22825
 fg.nf
 
-# ╔═╡ 07135b44-02cc-4813-bf36-4f3faf1a1f03
+# ╔═╡ 4348d758-73cf-4575-819c-4759acb1622f
 begin
-	graph_size = 6
+	synthetic_data = load(string(pwd(),"\\molecules.jld2"))
+	synthetic_graph_data = synthetic_data["molecules"]
+	synthetic_classes = synthetic_data["class_enc"]
+end
+
+# ╔═╡ 6a56f67b-9318-4fbf-a448-221e0cd6e522
+viz_graph(synthetic_graph_data[25])
+
+# ╔═╡ 324da530-d3c1-4c00-82b9-6f27da5e56f2
+graph_labels = [get_prop(g, :label) for g in synthetic_graph_data]
+
+# ╔═╡ 4b88d981-7326-4bac-954d-5b299a475e3d
+function mg_to_fg(meta_graphs, edge_labels, node_labels)
+	return_vec = []
+	for graph ∈ meta_graphs
+		nv = size(vertices(graph))[1]
+		edge_list = collect(edges(graph))
+		ne = size(edge_list)[1]
+		nf = zeros(Float32,nv,length(node_labels))
+		ef = zeros(Float32,ne,length(edge_labels))
+		adj = zeros(Float32,nv,nv)
+		for v ∈ vertices(graph)
+			nf[v,:] = props(graph,v)[:label] .== node_labels
+		end
+		for i ∈ 1:ne
+			e = edge_list[i]
+			ef[i,:] = props(graph,e)[:label] .== edge_labels
+		end
+		for i ∈ 1:nv
+			for j ∈ 1:nv
+				if props(graph,i,j) != Dict()
+					adj[i,j] = 1
+				end
+			end
+		end
+		adj = adj + adj'
+		Ã = split_adjacency(graph,edge_labels)
+		fg = FeaturedGraph(adj; nf=nf', ef=ef', gf = Ã)
+		push!(return_vec,fg)
+	end
+	return return_vec
+end
+		
+
+# ╔═╡ ffaebf5b-03e6-4ac4-b037-ee1caa74eeca
+synthetic_feature_graphs = mg_to_fg(synthetic_graph_data,[-1,1,2],[6,7,8])
+
+# ╔═╡ a2dacd2a-acba-46fa-8919-70302c6541ac
+synthetic_feature_graphs[1]
+
+# ╔═╡ ba1c5e76-7d7b-4568-b03f-d317f98df70d
+begin
+	target = Flux.onehotbatch(graph_labels, [true, false])
+	loader = []
+	for i ∈ 1:length(synthetic_feature_graphs)
+		push!(loader,(synthetic_feature_graphs[i],target[:,i]))
+	end
+	graph_size = 4
 	n_node_types_model = 3
 	n_edge_types_model = 3
-	p = 4
-	n_hidden_graphs = 12
-	nn = Chain(
+	p = 3
+	n_hidden_graphs = 4
+	model_synth = Chain(
 		Parallel(vcat, 
 			[KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
 		),
-		Dense(n_hidden_graphs => 8, tanh),
-	    Dense(8 => 8, tanh),
+		Dense(n_hidden_graphs => 4, tanh),
+	    Dense(4 => 4, tanh),
 		Dropout(0.2),
-		Dense(8 => 2, tanh),
-	    softmax
+		Dense(4 => 2, tanh),
+		softmax,
 	) |> device
+	
+	optim_synth = Flux.setup(Flux.Adam(.001), model_synth)
+	losses_s = []
+	loss_s = []
+	epoch_loss = []
+	for epoch in 1:300
+		for (x, y) in loader[5:40]
+			loss_s, grads_synth = Flux.withgradient(model_synth) do m
+				
+				y_hat = m(x)
+	            Flux.crossentropy(y_hat, y)
+				
+			end
+			Flux.update!(optim_synth, model_synth, grads_synth[1])
+			push!(epoch_loss, loss_s)
+		end
+		push!(losses_s, mean(epoch_loss))
+		epoch_loss = []
+	end
 end
 
-# ╔═╡ 45581b00-630a-49ae-a412-cb03dbdac925
-fg |> device
+# ╔═╡ 9c71c66f-907d-4c84-89b4-0a38ece28c62
+plot(losses_s)
 
-# ╔═╡ 7ec7d23e-f64f-45b2-ab9e-5f78f40d2e57
-nn(fg |> device) |> cpu
+# ╔═╡ 342cf369-2143-401b-a6e2-73a1ff89710f
+model_predictions = stack([maximum(model_synth(graph)) .== model_synth(graph) for graph ∈ synthetic_feature_graphs])
 
-# ╔═╡ b76eb4a6-d062-4cb9-b3a6-73914b08c20a
+# ╔═╡ 264a61cf-e204-4656-bc6b-0dac3c7c98c2
+sum([model_predictions[:,i] == target[:,i] for i ∈ 40:length(model_predictions[1,:])])/length(40:length(model_predictions[1,:]))
 
+# ╔═╡ f5ce99ea-6684-4701-9dec-e0922d013a08
+function hidden_graph_view(model, graph_number,number_hg)
+	A_2 = model.layers[1][graph_number].A_2
+	X_2 = model.layers[1][graph_number].X_2
+	A_norm_mx = model.layers[1][graph_number].A_norm_mx
+	num_edge_types = model.layers[1][graph_number].num_edge_types
+	
+	nv = size(A_2)[1]
+		
+	n_edge_types = size(A_2)[3]
+		
+	A_2_herm = stack([relu.(tanh.((A_2[:,:,i].*A_norm_mx)+(A_2[:,:,i].*A_norm_mx)')) for i ∈ 1:4])
+
+	id = Matrix{Float32}(I, nv, nv) |> (isa(A_2, CuArray) ? gpu : cpu)  
+	
+	A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+id for i ∈ 1:n_edge_types])
+	
+	A_2_norm = A_2_herm./A_2_adj
+
+	X_2_norm = relu.(X_2)./sum([relu.(X_2)[:,i] for i ∈ 1:num_edge_types])
+
+	res = []
+	start = zeros(Float32,number_hg)
+	start[graph_number] = 1
+	for i ∈ model_synth.layers[2:end]
+		if res == []
+			push!(res,i(start))
+		else
+			push!(res,i(res[end]))
+		end
+	end
+
+	return A_2_norm, X_2_norm, res[end]
+end
+
+# ╔═╡ 72f6259d-3b25-47a5-9166-493ef2967c75
+hidden_graph_view(model_synth, 3,4)
 
 # ╔═╡ Cell order:
 # ╠═a0936f30-ff65-11ed-352c-c795c803f250
@@ -332,10 +448,18 @@ nn(fg |> device) |> cpu
 # ╠═5f8872b1-838f-4c21-814c-f0eaee9da8ac
 # ╠═1107ffd6-347e-4c4b-bd56-e35cc445e8e1
 # ╠═319b6b2f-0b17-4123-8c54-895db1ec2bf7
-# ╟─fd430464-1093-47b7-be83-d0fe14a87547
+# ╠═fd430464-1093-47b7-be83-d0fe14a87547
 # ╟─000a1031-fbfe-4891-a565-64d627a37a6d
 # ╟─8294c34a-f1a2-4571-8199-e78a41c22825
-# ╠═07135b44-02cc-4813-bf36-4f3faf1a1f03
-# ╠═45581b00-630a-49ae-a412-cb03dbdac925
-# ╠═7ec7d23e-f64f-45b2-ab9e-5f78f40d2e57
-# ╠═b76eb4a6-d062-4cb9-b3a6-73914b08c20a
+# ╠═4348d758-73cf-4575-819c-4759acb1622f
+# ╠═6a56f67b-9318-4fbf-a448-221e0cd6e522
+# ╠═a2dacd2a-acba-46fa-8919-70302c6541ac
+# ╠═324da530-d3c1-4c00-82b9-6f27da5e56f2
+# ╠═4b88d981-7326-4bac-954d-5b299a475e3d
+# ╠═ffaebf5b-03e6-4ac4-b037-ee1caa74eeca
+# ╠═ba1c5e76-7d7b-4568-b03f-d317f98df70d
+# ╠═9c71c66f-907d-4c84-89b4-0a38ece28c62
+# ╠═342cf369-2143-401b-a6e2-73a1ff89710f
+# ╠═264a61cf-e204-4656-bc6b-0dac3c7c98c2
+# ╟─f5ce99ea-6684-4701-9dec-e0922d013a08
+# ╠═72f6259d-3b25-47a5-9166-493ef2967c75
