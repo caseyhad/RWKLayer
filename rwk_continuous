@@ -24,34 +24,33 @@ Flux.CUDA.set_runtime_version!("12.1")
 CUDA.versioninfo()
 
 # ╔═╡ 7ea77cb0-7037-4a24-9799-1e94fb2219aa
-begin
-        #g₁, g₂ = smilestomol.(["NC=O", "CN(C=O)C=O"])
-        #l = 4
-        #x = random_walk(GraphMatrix{Direct}(g₁, g₂); l=l)
-        #@test x == 74
-        #@test x == random_walk(ProductGraph{Direct}(g₁, g₂); l=l)
-        #@test x == random_walk(g₁, g₂; l=l)
-
-        g₁ = MetaGraph(removehydrogens(smilestomol("C[C@H]1[C@H](O)[C@@H](O)[C@@H](O)[C@@H](O1)O[C@H](C2=O)[C@H](c(c3)ccc(O)c3O)Oc(c24)cc(O)cc4O")))
-        g₂ = MetaGraph(removehydrogens(smilestomol("O[C@@H](O1)[C@H](O)[C@@H](O)[C@H](O)[C@H]1CO[C@@H](O2)[C@H](O)[C@@H](O)[C@@H](O)[C@H]2CO")))
-        dpg = ProductGraph{Direct}(g₁, g₂)
+begin # Demonstration that the Kronecker based approach and MGK have the same answer for K(x,y) between two molecular graphs
+	g₁ = MetaGraph(removehydrogens(smilestomol("C[C@H]1[C@H](O)[C@@H](O)[C@@H](O)[C@@H](O1)O[C@H](C2=O)[C@H](c(c3)ccc(O)c3O)Oc(c24)cc(O)cc4O")))
+	g₂ = MetaGraph(removehydrogens(smilestomol("O[C@@H](O1)[C@H](O)[C@@H](O)[C@H](O)[C@H]1CO[C@@H](O2)[C@H](O)[C@@H](O)[C@@H](O)[C@H]2CO")))
+	dpg = ProductGraph{Direct}(g₁, g₂)
 end
 
 # ╔═╡ 97888b1f-36bc-4731-b261-b863bb7e7e03
 begin
-	function split_adjacency(g,edge_labels)
-		nv = size(g)[1]
-		nt = length(edge_labels)
-		adj_layers = zeros(Float32,nv, nv, nt+1)
+	function split_adjacency(g::MetaGraph,edge_labels)::Array{Float32}
+		# Constructs an array of size n x n x l+1, where n is the number of nodes and l is the number of edge labels. each slice of the array is an adjaceny matrix of only edges of a specific label. The last slice of the array is reserved for the non-bonding pairs of vertice. Summing through the slices returns the adjacency matrix of a densly connected graph with no self-loops. 
+		
+		nv = size(g)[1] # number of vertices
+		nt = length(edge_labels) # number of edge types  
+		adj_layers = zeros(Float32,nv, nv, nt+1) # the extra level at the bottom is the non-edges (1-A)
 		adj_layers[:,:,nt+1] = ones(nv,nv).-Matrix{Float32}(I, nv, nv)
+
+		# check each edge for a label matching the current slice of the split adjacency matrix
 		for l ∈ eachindex(edge_labels)
 			for edge ∈ edges(g)
 				if get_prop(g, edge, :label) == edge_labels[l]
+					# add the edge to the matrix and delete the non-edge from the last layer
 					adj_layers[src(edge),dst(edge),l] = 1.0
 					adj_layers[src(edge),dst(edge),nt+1] = 0
 					adj_layers[dst(edge),src(edge),nt+1] = 0
 				end
 			end
+			# make symmetric
 			adj_layers[:,:,l] = adj_layers[:,:,l]+adj_layers[:,:,l]'
 		end
 		
@@ -80,7 +79,7 @@ begin
 end
 
 # ╔═╡ 433d45a2-e8be-44a4-b993-b4852c46546d
-begin
+begin # preparing a small size 4 FeaturedGraph for testing the KGNN layer
 	adjm = [0 1 0 1;
             1 0 1 1;
             0 1 0 1;
@@ -104,7 +103,8 @@ begin
 end
 
 # ╔═╡ 376b18e1-8b9f-4103-a5c9-78e1ea85c082
-function rwk_kron(g₁,g₂;l=1)
+function rwk_kron(g₁::MetaGraph,g₂::MetaGraph;l=1)
+	# The non-normalized kernel calculaion for two MetaGraphs
 	
 	edge_labels = unique(
 		[get_prop(g₁, edge, :label) for edge ∈ edges(g₁)]
@@ -132,7 +132,7 @@ function rwk_kron(g₁,g₂;l=1)
 		X₂[i,:] = vertex_labels.==get_prop(g₂, i, :label)
 	end
 
-
+	# formula for the kronecker-based random walk kernel of graphs with node and edge labels
 	return sum((vec(X₁*X₂')*vec(X₁*X₂')'.*sum([kron(A₂[:,:,i],A₁[:,:,i]) for i ∈ eachindex(edge_labels)]))^l)
 	
 end
@@ -163,7 +163,7 @@ end
   ╠═╡ =#
 
 # ╔═╡ d6df0686-dbe2-4c4f-a795-f90c24c35cb2
-function upper_triang(sz)
+function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
 	mx = zeros(Float32,sz,sz)
 	for i ∈ 1:sz
 		for j ∈ 1:sz
@@ -199,23 +199,28 @@ begin
 	
 	@functor KGNN
 
+	# normalized random walk layer, output ranges from [0,1]
 	function (l::KGNN)(A, X)::Float32
 
-		nv = size(l.A_2)[1]
+		nv = size(l.A_2)[1] # number of vertices
 		
-		n_edge_types = size(l.A_2)[3]
-		
-		A_2_herm = stack([relu.(tanh.((l.A_2[:,:,i].*l.A_norm_mx)+(l.A_2[:,:,i].*l.A_norm_mx)')) for i ∈ 1:4])
+		n_edge_types = size(l.A_2)[3] # number of edge labels
 
-		id = Matrix{Float32}(I, nv, nv) |> (isa(l.A_2, CuArray) ? gpu : cpu)  
+		# Deletions of the self loops and copying upper triangle to the lower triangle to make symmetric. The final product resembles the "split adjacency"
+		#A_2_herm = stack([relu.(tanh.((l.A_2[:,:,i].*l.A_norm_mx)+(l.A_2[:,:,i].*l.A_norm_mx)')) for i ∈ 1:4])
+		A_2_herm = stack([relu.((l.A_2[:,:,i].*l.A_norm_mx)+(l.A_2[:,:,i].*l.A_norm_mx)') for i ∈ 1:4])
+
+		id = Matrix{Float32}(I, nv, nv) |> (isa(l.A_2, CuArray) ? gpu : cpu) # identity matrix on cpu or fpu depending on which is being used
 		
-		A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+id for i ∈ 1:n_edge_types])
+		A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+id for i ∈ 1:n_edge_types]) # a slice of this matrix houses the sum of an edge label vector for each edge. the identity matrix is added to avoid dividing by 0 on the main daigonal. The matrix is copied for each slice to match dimensions of A_2_herm
 		
-		A_2_norm = A_2_herm./A_2_adj
-		
+		A_2_norm = A_2_herm./A_2_adj # result - all edge feature vectors sum to 1
+
+		# same result as edge features except for node features
 		X_2_norm = relu.(l.X_2)./sum([relu.(l.X_2)[:,i] for i ∈ 1:l.num_edge_types])
+		
 
-
+		# inner product normalization - k(x,y)/(k(x,x)*k(y,y))^.5
 		return sum((vec(X*X_2_norm')*vec(X*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)/(sum((vec(X*X')*vec(X*X')'.*sum([kron(A[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)*sum((vec(X_2_norm*X_2_norm')*vec(X_2_norm*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A_2_norm[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p))^.5
 	
 	end
@@ -234,7 +239,7 @@ end
   ╠═╡ =#
 
 # ╔═╡ 863ae18c-eb5e-45ab-ac0a-6ba0363a5603
-begin
+begin # isomorphism learning test with one size 4 hidden graph, loss is 1-kernel score
 	A_2 = Float32.(rand(4,4, 4))
 	model = KGNN(A_2, Float32.(rand(4,3)), 3, 4, relu, upper_triang(4)) |> device
 	optim = Flux.setup(Flux.Momentum(1, 0.5), model)
@@ -242,13 +247,11 @@ begin
 	loss = []
 	for epoch in 1:300
 		loss, grads = Flux.withgradient(model) do m
-			
-			# Evaluate model and loss inside gradient context:
 			ker_norm = m(fg)
-			1-ker_norm
+			1-ker_norm # loss function
 		end
-		Flux.update!(optim, model, grads[1])
-		push!(losses, loss)  # logging, outside gradient context
+		Flux.update!(optim, model, grads[1]) # update model using the gradient
+		push!(losses, loss)
 	end
 end
 
@@ -263,12 +266,12 @@ mcpu = (model |> cpu)
 mcpu(fg |> cpu)
 
 # ╔═╡ 319b6b2f-0b17-4123-8c54-895db1ec2bf7
-begin
+begin # same logic as inside the kernel layer, to replicate the hidden graph from the "point of view" of the kernel function
 	nv = size(mcpu.A_2)[1]
 		
 	n_edge_types = size(mcpu.A_2)[3]
 		
-	A_2_herm = stack([relu.(tanh.((mcpu.A_2[:,:,i].*mcpu.A_norm_mx)+(mcpu.A_2[:,:,i].*mcpu.A_norm_mx)')) for i ∈ 1:4])
+	A_2_herm = stack([relu.((mcpu.A_2[:,:,i].*mcpu.A_norm_mx)+(mcpu.A_2[:,:,i].*mcpu.A_norm_mx)') for i ∈ 1:4])
 
 	id = Matrix{Float32}(I, nv, nv) |> (isa(mcpu.A_2, CuArray) ? gpu : cpu)  
 	
@@ -287,7 +290,7 @@ split_adjacency(fg |> cpu)
 fg.nf
 
 # ╔═╡ 4348d758-73cf-4575-819c-4759acb1622f
-begin
+begin # load synthetic test set #1
 	synthetic_data = load(string(pwd(),"\\molecules.jld2"))
 	synthetic_graph_data = synthetic_data["molecules"]
 	synthetic_classes = synthetic_data["class_enc"]
@@ -300,7 +303,7 @@ viz_graph(synthetic_graph_data[25])
 graph_labels = [get_prop(g, :label) for g in synthetic_graph_data]
 
 # ╔═╡ 4b88d981-7326-4bac-954d-5b299a475e3d
-function mg_to_fg(meta_graphs, edge_labels, node_labels)
+function mg_to_fg(meta_graphs::Vector{MetaGraphs.MetaGraph{Int64, Float64}}, edge_labels::Vector, node_labels::Vector)::Array{AbstractFeaturedGraph} # converts graphs from MetaGraph to the AbstractFeaturedGraphs type used by GeometricFlux. Edges all originate from the smaller indexed vertex to the larger indexed vertex (Edge: 1 => 3, not 3 => 1). Edge features are ordered based on 1) smallest index origin vertex and 2) smallest terminating vertex (same as reading the adjacency matrix right to left, top to bottom). output is one-hot style for edge/node features
 	return_vec = []
 	for graph ∈ meta_graphs
 		nv = size(vertices(graph))[1]
@@ -401,7 +404,7 @@ function hidden_graph_view(model, graph_number,number_hg)
 		
 	n_edge_types = size(A_2)[3]
 		
-	A_2_herm = stack([relu.(tanh.((A_2[:,:,i].*A_norm_mx)+(A_2[:,:,i].*A_norm_mx)')) for i ∈ 1:4])
+	A_2_herm = stack([relu.((A_2[:,:,i].*A_norm_mx)+(A_2[:,:,i].*A_norm_mx)') for i ∈ 1:4])
 
 	id = Matrix{Float32}(I, nv, nv) |> (isa(A_2, CuArray) ? gpu : cpu)  
 	
@@ -411,22 +414,109 @@ function hidden_graph_view(model, graph_number,number_hg)
 
 	X_2_norm = relu.(X_2)./sum([relu.(X_2)[:,i] for i ∈ 1:num_edge_types])
 
-	res = []
-	start = zeros(Float32,number_hg)
-	start[graph_number] = 1
-	for i ∈ model_synth.layers[2:end]
-		if res == []
-			push!(res,i(start))
-		else
-			push!(res,i(res[end]))
-		end
-	end
+	graph_feature = [i == graph_number for i ∈ 1:number_hg]
+	res = Chain(model.layers[2:end]...)(graph_feature)
 
-	return A_2_norm, X_2_norm, res[end]
+	return A_2_norm, X_2_norm, res
 end
 
 # ╔═╡ 72f6259d-3b25-47a5-9166-493ef2967c75
 hidden_graph_view(model_synth, 3,4)
+
+# ╔═╡ 3fd91b06-a9fa-4b68-8b10-41ef539b148d
+begin
+	synthetic_data_med = load(string(pwd(),"\\molecules_med.jld2"))
+	synthetic_graph_data_med = synthetic_data_med["molecules"]
+	synthetic_classes_med = synthetic_data_med["class_enc"]
+end
+
+# ╔═╡ 9d71fb11-2814-45f2-b388-7f282a71b185
+viz_graph(synthetic_graph_data_med[4])
+
+# ╔═╡ 93d1b361-6da5-4375-83fb-51288097239b
+graph_labels_med = [get_prop(g, :label) for g in synthetic_graph_data_med]
+
+# ╔═╡ fdfcbe58-49d6-46b9-a23e-5ea95649934f
+sum(graph_labels_med)/length(graph_labels_med)
+
+# ╔═╡ 1e162154-2b3b-4d63-bebe-aba082421394
+synthetic_feature_graphs_med = mg_to_fg(synthetic_graph_data_med,[-1,1,2],[6,7,8])
+
+# ╔═╡ 46c4811e-7ff3-4c8b-b971-98c0b896b289
+function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_graphs)
+	model = Chain(
+		Parallel(vcat, 
+			[KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
+		),
+		Dense(n_hidden_graphs => 4, tanh),
+	    Dense(4 => 4, tanh),
+		Dropout(0.2),
+		Dense(4 => 2, tanh),
+		softmax,
+	)
+	return model
+end
+
+# ╔═╡ 24ce2183-23c0-4c79-ab72-fbe9b2b70eee
+function train_model(class_labels,graph_vector,model)
+	target = Flux.onehotbatch(class_labels, [true, false])
+	loader = []
+	
+	for i ∈ 1:length(graph_vector)
+		push!(loader,(graph_vector[i],target[:,i]))
+	end
+
+	model |> device
+	
+	optim = Flux.setup(Flux.Adam(.001), model)
+	losses = []
+	loss = []
+	epoch_loss = []
+	for epoch in 1:1000
+		for (x, y) in loader
+			loss, grads = Flux.withgradient(model) do m
+				
+				y_hat = m(x)
+	            Flux.crossentropy(y_hat, y)
+				
+			end
+			Flux.update!(optim, model, grads[1])
+			push!(epoch_loss, loss)
+		end
+		push!(losses, mean(epoch_loss))
+		epoch_loss = []
+	end
+	return losses, model
+end
+
+# ╔═╡ c03e26ef-f56f-4022-9197-e8c4d57c5d2d
+# ╠═╡ disabled = true
+#=╠═╡
+epoch_losses, res_model = train_model(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(6,3,3,4,6))
+  ╠═╡ =#
+
+# ╔═╡ b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
+#=╠═╡
+plot(epoch_losses)
+  ╠═╡ =#
+
+# ╔═╡ de7c1f09-b8d1-4741-a163-1fcc22f2f017
+#=╠═╡
+hidden_graph_view(res_model, 2,6)
+  ╠═╡ =#
+
+# ╔═╡ 56397871-0a83-4368-b648-d65fec55d983
+#=╠═╡
+@save "res_model.jld2" res_model
+  ╠═╡ =#
+
+# ╔═╡ 7034f207-6503-4da6-90c9-391c6b6dd607
+#=╠═╡
+res_model.layers[1][4].A_norm_mx
+  ╠═╡ =#
+
+# ╔═╡ f7c0f3f8-d975-44d7-9dcb-1a3813f80890
+
 
 # ╔═╡ Cell order:
 # ╠═a0936f30-ff65-11ed-352c-c795c803f250
@@ -461,5 +551,18 @@ hidden_graph_view(model_synth, 3,4)
 # ╠═9c71c66f-907d-4c84-89b4-0a38ece28c62
 # ╠═342cf369-2143-401b-a6e2-73a1ff89710f
 # ╠═264a61cf-e204-4656-bc6b-0dac3c7c98c2
-# ╟─f5ce99ea-6684-4701-9dec-e0922d013a08
+# ╠═f5ce99ea-6684-4701-9dec-e0922d013a08
 # ╠═72f6259d-3b25-47a5-9166-493ef2967c75
+# ╠═3fd91b06-a9fa-4b68-8b10-41ef539b148d
+# ╠═9d71fb11-2814-45f2-b388-7f282a71b185
+# ╠═93d1b361-6da5-4375-83fb-51288097239b
+# ╠═fdfcbe58-49d6-46b9-a23e-5ea95649934f
+# ╠═1e162154-2b3b-4d63-bebe-aba082421394
+# ╠═46c4811e-7ff3-4c8b-b971-98c0b896b289
+# ╠═24ce2183-23c0-4c79-ab72-fbe9b2b70eee
+# ╠═c03e26ef-f56f-4022-9197-e8c4d57c5d2d
+# ╠═b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
+# ╠═de7c1f09-b8d1-4741-a163-1fcc22f2f017
+# ╠═56397871-0a83-4368-b648-d65fec55d983
+# ╠═7034f207-6503-4da6-90c9-391c6b6dd607
+# ╠═f7c0f3f8-d975-44d7-9dcb-1a3813f80890
