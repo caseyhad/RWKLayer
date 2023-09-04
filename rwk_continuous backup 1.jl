@@ -432,7 +432,6 @@ end
 
 # ╔═╡ 24ce2183-23c0-4c79-ab72-fbe9b2b70eee
 function train_model(class_labels,graph_vector,model)
-	n = 650
 	target = Flux.onehotbatch(class_labels, [true, false])
 	loader = []
 	
@@ -446,9 +445,8 @@ function train_model(class_labels,graph_vector,model)
 	losses = []
 	loss = []
 	epoch_loss = []
-	#past_models = []
-	for epoch in 1:n
-		#push!(past_models,model)
+	past_models = []
+	for epoch in 1:750
 		for (x, y) in loader
 			loss, grads = Flux.withgradient(model) do m
 				
@@ -461,94 +459,19 @@ function train_model(class_labels,graph_vector,model)
 		end
 		push!(losses, mean(epoch_loss))
 		epoch_loss = []
+		push!(past_models,model)
 	end
-	return losses, model#, past_models
-end
-
-# ╔═╡ 2aa717e4-a16c-4d98-a3bf-2f2f07dc76c4
-res_losses1, res_model1 = train_model(graph_labels_med[1:9],synthetic_feature_graphs_med[1:9],make_kgnn(5,3,3,4,3))
-
-# ╔═╡ c0472846-94ac-4465-87e2-3ad97bd0ac4c
-plot(res_losses1)
-
-# ╔═╡ 2db35062-37fe-408b-805e-90ab991152cb
-function gradient_accumulation!(old_grads,new_grads)
-	
-	hg_layer_old = old_grads[1].layers[1].layers[:]
-	hg_layer_new = new_grads[1].layers[1].layers[:]
-	n_hg = length(hg_layer_old)
-	
-	for i ∈ eachindex(hg_layer_old)
-		hg_layer_old[i].A_2 .+= hg_layer_new[i].A_2
-		hg_layer_old[i].X_2 .+= hg_layer_new[i].X_2
-	end
-
-	for i ∈ 2:length(old_grads[1].layers[:])
-		try
-			old_grads[1].layers[i].weight .+= new_grads[1].layers[i].weight
-			old_grads[1].layers[i].bias .+= new_grads[1].layers[i].bias
-		catch e 
-		end
-	end
-	return old_grads
-end
-
-# ╔═╡ 94b85ed5-a190-45cd-a0c3-09802dbf578d
-function train_model_batch(class_labels,graph_vector,model)
-	n = 1200
-	lr = 2
-	target = Flux.onehotbatch(class_labels, [true, false])
-	loader = []
-	n_samples = length(graph_vector)
-	
-	for i ∈ 1:n_samples
-		push!(loader,(graph_vector[i],target[:,i]))
-	end
-
-	model |> device
-	
-	optim = Flux.setup(Flux.Adam(lr/n_samples), model)
-	
-	losses = []
-	loss = []
-
-	for epoch in 1:n
-		
-		grads_s = Float32(0)
-		loss_s = Float32(0)
-
-		for (x, y) in loader
-			
-				loss, grads = Flux.withgradient(model) do m
-				
-					y_hat = m(x)
-		            Flux.crossentropy(y_hat, y)
-					
-				end
-			
-			loss_s += loss
-			
-			if grads_s == Float32(0)
-				grads_s = grads
-			else
-				grads_s = gradient_accumulation!(grads_s,grads)
-			end
-		end
-		
-		Flux.update!(optim, model, grads_s[1])
-		push!(losses, loss_s/n_samples)
-	end
-	return losses, model
+	return losses, model, past_models
 end
 
 # ╔═╡ c03e26ef-f56f-4022-9197-e8c4d57c5d2d
-res_losses, res_model = train_model_batch(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(5,3,3,4,12))
+epoch_losses, res_model, past_models = train_model(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(5,3,3,4,8))
 
 # ╔═╡ b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
-plot(res_losses)
+plot(epoch_losses)
 
 # ╔═╡ de7c1f09-b8d1-4741-a163-1fcc22f2f017
-hidden_graph_view(res_model,3,3)
+hidden_graph_view(res_model, 8,8)
 
 # ╔═╡ b5580104-8a87-4115-91bb-b3d75148aaf9
 test_prediction = [1-(maximum(res_model(synthetic_feature_graphs_med[i])).==res_model(synthetic_feature_graphs_med[i])[2]) for i ∈ 90:length(synthetic_feature_graphs_med)]
@@ -557,11 +480,15 @@ test_prediction = [1-(maximum(res_model(synthetic_feature_graphs_med[i])).==res_
 test = graph_labels_med[90:end]
 
 # ╔═╡ f346c057-5416-44d7-854d-e3da68626222
-mean(test_prediction.==test)
+(test_prediction'*test)/length(test)
+
+# ╔═╡ bc470972-3e0c-46a0-b1ea-4b799968453e
+
 
 # ╔═╡ Cell order:
 # ╠═a0936f30-ff65-11ed-352c-c795c803f250
 # ╠═643fcfc0-f38b-4f18-954d-4355e840b032
+# ╠═128f77d4-96e4-4442-bd02-338e04ae0ad8
 # ╠═b1a5c617-9543-4294-a557-f735d5ac7365
 # ╠═7ea77cb0-7037-4a24-9799-1e94fb2219aa
 # ╠═97888b1f-36bc-4731-b261-b863bb7e7e03
@@ -570,7 +497,9 @@ mean(test_prediction.==test)
 # ╠═2f3098ae-a36e-4d90-8241-32fe70259cb6
 # ╠═3370544e-76fb-4b15-b59a-1cae00d2e514
 # ╠═2a77361d-4872-4aa2-b63a-2d367bd16ec4
+# ╠═aaa6cd0f-b37d-4228-82ad-df39e0ac17bd
 # ╠═d6df0686-dbe2-4c4f-a795-f90c24c35cb2
+# ╠═84e3bd33-cdc4-43cf-8e93-953c01184d64
 # ╠═863ae18c-eb5e-45ab-ac0a-6ba0363a5603
 # ╠═35ed4380-8cf0-4193-9c9a-d497f0af344d
 # ╠═5f8872b1-838f-4c21-814c-f0eaee9da8ac
@@ -599,13 +528,10 @@ mean(test_prediction.==test)
 # ╠═1e162154-2b3b-4d63-bebe-aba082421394
 # ╠═46c4811e-7ff3-4c8b-b971-98c0b896b289
 # ╠═24ce2183-23c0-4c79-ab72-fbe9b2b70eee
-# ╠═94b85ed5-a190-45cd-a0c3-09802dbf578d
 # ╠═c03e26ef-f56f-4022-9197-e8c4d57c5d2d
 # ╠═b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
-# ╠═2aa717e4-a16c-4d98-a3bf-2f2f07dc76c4
-# ╠═c0472846-94ac-4465-87e2-3ad97bd0ac4c
-# ╠═2db35062-37fe-408b-805e-90ab991152cb
 # ╠═de7c1f09-b8d1-4741-a163-1fcc22f2f017
 # ╠═b5580104-8a87-4115-91bb-b3d75148aaf9
 # ╠═15d6b88e-75e1-46ae-b6da-995d803e1599
 # ╠═f346c057-5416-44d7-854d-e3da68626222
+# ╠═bc470972-3e0c-46a0-b1ea-4b799968453e
