@@ -11,6 +11,9 @@ begin
 	using MolecularGraph, MolecularGraphKernels, Test, MetaGraphs, Graphs, ProfileCanvas, PlutoUI, BenchmarkTools, Flux, Functors, Zygote, LinearAlgebra, Plots, CUDA, JLD2, GeometricFlux, Kronecker
 end
 
+# ╔═╡ b812bbb1-1566-4223-8ec6-300ece350e6d
+using Random
+
 # ╔═╡ 643fcfc0-f38b-4f18-954d-4355e840b032
 device = cpu
 
@@ -138,19 +141,6 @@ rwk_kron(g₁,g₂;l=5)
 # ╔═╡ 3370544e-76fb-4b15-b59a-1cae00d2e514
 MolecularGraphKernels.random_walk(ProductGraph{Direct}(g₁, g₂); l=5)
 
-# ╔═╡ d6df0686-dbe2-4c4f-a795-f90c24c35cb2
-function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
-	mx = zeros(Float32,sz,sz)
-	for i ∈ 1:sz
-		for j ∈ 1:sz
-			if j>i
-				mx[i,j] = 1
-			end
-		end
-	end
-	return mx
-end
-
 # ╔═╡ 2a77361d-4872-4aa2-b63a-2d367bd16ec4
 begin
 	struct KGNN <: AbstractGraphLayer
@@ -203,6 +193,19 @@ begin
 	function (l::KGNN)(fg::AbstractFeaturedGraph)
 	    return l(global_feature(fg), node_feature(fg)')
 	end
+end
+
+# ╔═╡ d6df0686-dbe2-4c4f-a795-f90c24c35cb2
+function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
+	mx = zeros(Float32,sz,sz)
+	for i ∈ 1:sz
+		for j ∈ 1:sz
+			if j>i
+				mx[i,j] = 1
+			end
+		end
+	end
+	return mx
 end
 
 # ╔═╡ 863ae18c-eb5e-45ab-ac0a-6ba0363a5603
@@ -465,37 +468,40 @@ function train_model(class_labels,graph_vector,model)
 	return losses, model#, past_models
 end
 
-# ╔═╡ 2aa717e4-a16c-4d98-a3bf-2f2f07dc76c4
-res_losses1, res_model1 = train_model(graph_labels_med[1:9],synthetic_feature_graphs_med[1:9],make_kgnn(5,3,3,4,3))
+# ╔═╡ 2a1fc059-a1e3-4025-b53e-d3e07a2c4de7
+Threads.nthreads()
 
-# ╔═╡ c0472846-94ac-4465-87e2-3ad97bd0ac4c
-plot(res_losses1)
+# ╔═╡ 8c3d17ab-aa6c-497f-ade2-68904de2e5be
 
-# ╔═╡ 2db35062-37fe-408b-805e-90ab991152cb
-function gradient_accumulation!(old_grads,new_grads)
-	
-	hg_layer_old = old_grads[1].layers[1].layers[:]
-	hg_layer_new = new_grads[1].layers[1].layers[:]
-	n_hg = length(hg_layer_old)
-	
-	for i ∈ eachindex(hg_layer_old)
-		hg_layer_old[i].A_2 .+= hg_layer_new[i].A_2
-		hg_layer_old[i].X_2 .+= hg_layer_new[i].X_2
+
+# ╔═╡ 4b1e66e5-ec04-4e1c-85c6-5078da9ffef7
+begin ## functions to add NamedTuple Gradients together for gradient accumulation in batch learning. Credit: Adrian Henle
+	function recursive_addition!(a, b)
+	    if isa(a, Number)
+	        return a + b
+	    elseif isnothing(a)
+	        return b
+	    end
+	    
+	    for key in keys(a)
+	        x = recursive_addition!(a[key], b[key])
+	        if isa(x, Number)
+	            a[key] = x
+	        end
+	    end
+	    
+	    return a
 	end
 
-	for i ∈ 2:length(old_grads[1].layers[:])
-		try
-			old_grads[1].layers[i].weight .+= new_grads[1].layers[i].weight
-			old_grads[1].layers[i].bias .+= new_grads[1].layers[i].bias
-		catch e 
-		end
+	function add_gradients(grad1, grad2)
+	    g1, g2 = (x -> x[1]).([grad1, grad2])   
+	    return Tuple((; layers=recursive_addition!(deepcopy(g1), g2)))
 	end
-	return old_grads
 end
 
 # ╔═╡ 94b85ed5-a190-45cd-a0c3-09802dbf578d
 function train_model_batch(class_labels,graph_vector,model)
-	n = 1200
+	n = 2
 	lr = 2
 	target = Flux.onehotbatch(class_labels, [true, false])
 	loader = []
@@ -531,7 +537,7 @@ function train_model_batch(class_labels,graph_vector,model)
 			if grads_s == Float32(0)
 				grads_s = grads
 			else
-				grads_s = gradient_accumulation!(grads_s,grads)
+				grads_s = add_gradients(grads_s,grads)
 			end
 		end
 		
@@ -541,14 +547,133 @@ function train_model_batch(class_labels,graph_vector,model)
 	return losses, model
 end
 
+# ╔═╡ 29d70467-259a-4b98-ac86-2c57bd56fe83
+function train_model_batch_mt(class_labels,graph_vector,model, batch_sz)
+	n = 5
+	lr = 2
+	target = Flux.onehotbatch(class_labels, [true, false])
+	loader = []
+	n_samples = length(graph_vector)
+	
+	for i ∈ 1:n_samples
+		push!(loader,(graph_vector[i],target[:,i]))
+	end
+
+	optim = Flux.setup(Flux.Adam(lr/n_samples), model)
+	
+	losses = []
+
+	threads = Threads.nthreads()
+
+	for epoch in 1:n
+
+		random_sample = collect(1:n_samples)[randperm(length(collect(1:n_samples)))][1:batch_sz]
+		
+		grads_s = [Vector{Any}() for i ∈ 1:threads]
+		loss_s = zeros(threads)
+
+		Threads.@threads for (x, y) in loader[random_sample]
+			
+				loss, grads = Flux.withgradient(model) do m
+				
+					y_hat = m(x)
+		            Flux.crossentropy(y_hat, y)
+					
+				end
+			threadid = Threads.threadid()
+			
+			loss_s[threadid] += loss
+			
+			push!(grads_s[threadid],grads)
+
+			grads_s[threadid] = [reduce(add_gradients, grads_s[threadid])]
+		end
+
+		∇ = reduce(add_gradients, reduce(vcat,grads_s))
+		
+		Flux.update!(optim, model, ∇[1])
+		push!(losses, sum(loss_s)/n_samples)
+	end
+	return losses, model
+end
+
+# ╔═╡ 5733eb6a-5775-481d-bc27-e1d0abee8968
+zz = fill(Vector{Any}(),4)
+
+# ╔═╡ 3fe49e64-d687-4892-a149-8505587a889d
+push!(zz[1],"a")
+
+# ╔═╡ 9a2db8a3-e814-4a5d-9d99-b12eeee684a3
+zz
+
 # ╔═╡ c03e26ef-f56f-4022-9197-e8c4d57c5d2d
-res_losses, res_model = train_model_batch(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(5,3,3,4,12))
+res_losses, res_model = train_model_batch(graph_labels_med[1:9],synthetic_feature_graphs_med[1:9],make_kgnn(5,3,3,4,3))
+
+# ╔═╡ 2c2be83e-3f59-4288-be2c-7df22c10c298
+train_model_batch(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(5,3,3,4,10))
+
+# ╔═╡ 149a7680-f634-414a-8324-109da1c10e18
+train_model_batch_mt(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(5,3,3,4,10),9)
 
 # ╔═╡ b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
 plot(res_losses)
 
+# ╔═╡ 2aa717e4-a16c-4d98-a3bf-2f2f07dc76c4
+# ╠═╡ disabled = true
+#=╠═╡
+res_losses1, res_model1 = train_model(graph_labels_med[1:9],synthetic_feature_graphs_med[1:9],make_kgnn(5,3,3,4,3))
+  ╠═╡ =#
+
+# ╔═╡ c0472846-94ac-4465-87e2-3ad97bd0ac4c
+#=╠═╡
+plot(res_losses1)
+  ╠═╡ =#
+
+# ╔═╡ d0814d3f-3971-4eff-ab65-e79525d89107
+begin
+	loss1, grads1 = Flux.withgradient(res_model) do m
+				
+		y_hat = m(synthetic_feature_graphs_med[1])
+		Flux.crossentropy(y_hat, [1,0])
+					
+	end
+end
+
+# ╔═╡ 8eae6cbe-b351-4cc2-a6bb-a112e811979e
+a = [grads1,grads1]
+
+# ╔═╡ 2db35062-37fe-408b-805e-90ab991152cb
+function gradient_accumulation!(old_grads,new_grads)
+
+	if old_grads == []
+		old_grads = new_grads
+		return old_grads
+	end
+	
+	hg_layer_old = old_grads[1].layers[1].layers[:]
+	hg_layer_new = new_grads[1].layers[1].layers[:]
+	n_hg = length(hg_layer_old)
+	
+	for i ∈ eachindex(hg_layer_old)
+		hg_layer_old[i].A_2 .+= hg_layer_new[i].A_2
+		hg_layer_old[i].X_2 .+= hg_layer_new[i].X_2
+	end
+
+	for i ∈ 2:length(old_grads[1].layers[:])
+		try
+			old_grads[1].layers[i].weight .+= new_grads[1].layers[i].weight
+			old_grads[1].layers[i].bias .+= new_grads[1].layers[i].bias
+		catch e 
+		end
+	end
+	return old_grads
+end
+
+# ╔═╡ dee3f7b8-38b6-497f-95c5-bfd424ff8b55
+a_new = reduce(gradient_accumulation!,a)
+
 # ╔═╡ de7c1f09-b8d1-4741-a163-1fcc22f2f017
-hidden_graph_view(res_model,3,3)
+hidden_graph_view(res_model,12,12)
 
 # ╔═╡ b5580104-8a87-4115-91bb-b3d75148aaf9
 test_prediction = [1-(maximum(res_model(synthetic_feature_graphs_med[i])).==res_model(synthetic_feature_graphs_med[i])[2]) for i ∈ 90:length(synthetic_feature_graphs_med)]
@@ -600,10 +725,23 @@ mean(test_prediction.==test)
 # ╠═46c4811e-7ff3-4c8b-b971-98c0b896b289
 # ╠═24ce2183-23c0-4c79-ab72-fbe9b2b70eee
 # ╠═94b85ed5-a190-45cd-a0c3-09802dbf578d
+# ╠═2a1fc059-a1e3-4025-b53e-d3e07a2c4de7
+# ╠═b812bbb1-1566-4223-8ec6-300ece350e6d
+# ╠═8c3d17ab-aa6c-497f-ade2-68904de2e5be
+# ╠═29d70467-259a-4b98-ac86-2c57bd56fe83
+# ╠═4b1e66e5-ec04-4e1c-85c6-5078da9ffef7
+# ╠═5733eb6a-5775-481d-bc27-e1d0abee8968
+# ╠═3fe49e64-d687-4892-a149-8505587a889d
+# ╠═9a2db8a3-e814-4a5d-9d99-b12eeee684a3
 # ╠═c03e26ef-f56f-4022-9197-e8c4d57c5d2d
+# ╠═2c2be83e-3f59-4288-be2c-7df22c10c298
+# ╠═149a7680-f634-414a-8324-109da1c10e18
 # ╠═b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
 # ╠═2aa717e4-a16c-4d98-a3bf-2f2f07dc76c4
 # ╠═c0472846-94ac-4465-87e2-3ad97bd0ac4c
+# ╠═d0814d3f-3971-4eff-ab65-e79525d89107
+# ╠═8eae6cbe-b351-4cc2-a6bb-a112e811979e
+# ╠═dee3f7b8-38b6-497f-95c5-bfd424ff8b55
 # ╠═2db35062-37fe-408b-805e-90ab991152cb
 # ╠═de7c1f09-b8d1-4741-a163-1fcc22f2f017
 # ╠═b5580104-8a87-4115-91bb-b3d75148aaf9
