@@ -141,6 +141,19 @@ rwk_kron(g₁,g₂;l=5)
 # ╔═╡ 3370544e-76fb-4b15-b59a-1cae00d2e514
 MolecularGraphKernels.random_walk(ProductGraph{Direct}(g₁, g₂); l=5)
 
+# ╔═╡ d6df0686-dbe2-4c4f-a795-f90c24c35cb2
+function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
+	mx = zeros(Float32,sz,sz)
+	for i ∈ 1:sz
+		for j ∈ 1:sz
+			if j>i
+				mx[i,j] = 1
+			end
+		end
+	end
+	return mx
+end
+
 # ╔═╡ 2a77361d-4872-4aa2-b63a-2d367bd16ec4
 begin
 	struct KGNN <: AbstractGraphLayer
@@ -195,18 +208,28 @@ begin
 	end
 end
 
-# ╔═╡ d6df0686-dbe2-4c4f-a795-f90c24c35cb2
-function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
-	mx = zeros(Float32,sz,sz)
-	for i ∈ 1:sz
-		for j ∈ 1:sz
-			if j>i
-				mx[i,j] = 1
-			end
-		end
+# ╔═╡ ec96964e-18ac-479b-8e2f-63baf0425411
+function test_layer(A, X)::Float32
+
+		nv = size(l.A_2)[1]
+		
+		n_edge_types = size(l.A_2)[3]
+
+		A_norm_mx = Zygote.@ignore upper_triang(nv)
+
+		A_2_herm = stack([relu.((l.A_2[:,:,i].*A_norm_mx)+(l.A_2[:,:,i].*A_norm_mx)') for i ∈ 1:4])
+
+		id = Matrix{Float32}(I, nv, nv) |> (isa(l.A_2, CuArray) ? gpu : cpu)
+		
+		A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+id for i ∈ 1:n_edge_types])
+		
+		A_2_norm = A_2_herm./A_2_adj
+
+		X_2_norm = relu.(l.X_2)./sum([relu.(l.X_2)[:,i] for i ∈ 1:l.num_edge_types])
+		
+		return sum((vec(X*X_2_norm')*vec(X*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)
+	
 	end
-	return mx
-end
 
 # ╔═╡ 863ae18c-eb5e-45ab-ac0a-6ba0363a5603
 begin # isomorphism learning test with one size 4 hidden graph, loss is 1-kernel score
@@ -435,7 +458,7 @@ end
 
 # ╔═╡ 24ce2183-23c0-4c79-ab72-fbe9b2b70eee
 function train_model(class_labels,graph_vector,model)
-	n = 650
+	n = 1000
 	target = Flux.onehotbatch(class_labels, [true, false])
 	loader = []
 	
@@ -445,7 +468,7 @@ function train_model(class_labels,graph_vector,model)
 
 	model |> device
 	
-	optim = Flux.setup(Flux.Adam(.005), model)
+	optim = Flux.setup(Flux.Adam(.001), model)
 	losses = []
 	loss = []
 	epoch_loss = []
@@ -549,8 +572,8 @@ end
 
 # ╔═╡ 29d70467-259a-4b98-ac86-2c57bd56fe83
 function train_model_batch_mt(class_labels,graph_vector,model, batch_sz)
-	n = 5
-	lr = 2
+	n = 2000
+	lr = .02
 	target = Flux.onehotbatch(class_labels, [true, false])
 	loader = []
 	n_samples = length(graph_vector)
@@ -567,31 +590,33 @@ function train_model_batch_mt(class_labels,graph_vector,model, batch_sz)
 
 	for epoch in 1:n
 
-		random_sample = collect(1:n_samples)[randperm(length(collect(1:n_samples)))][1:batch_sz]
+		randomize = randperm(length(collect(1:n_samples)))
+		batches = collect(Base.Iterators.partition(randomize,batch_sz))
 		
 		grads_s = [Vector{Any}() for i ∈ 1:threads]
 		loss_s = zeros(threads)
-
-		Threads.@threads for (x, y) in loader[random_sample]
-			
-				loss, grads = Flux.withgradient(model) do m
+		
+		for batch ∈ batches
+			Threads.@threads for (x, y) in loader[batch]
+				threadid = Threads.threadid()
 				
-					y_hat = m(x)
-		            Flux.crossentropy(y_hat, y)
+					loss, grads = Flux.withgradient(model) do m
 					
-				end
-			threadid = Threads.threadid()
-			
-			loss_s[threadid] += loss
-			
-			push!(grads_s[threadid],grads)
-
-			grads_s[threadid] = [reduce(add_gradients, grads_s[threadid])]
+						y_hat = m(x)
+			            Flux.mse(y_hat, y)
+						
+					end
+				
+				loss_s[threadid] += loss
+				push!(grads_s[threadid],grads)
+	
+				grads_s[threadid] = [reduce(add_gradients, grads_s[threadid])]
+			end
+			∇ = reduce(add_gradients, reduce(vcat,grads_s))
+		
+			Flux.update!(optim, model, ∇[1])
 		end
 
-		∇ = reduce(add_gradients, reduce(vcat,grads_s))
-		
-		Flux.update!(optim, model, ∇[1])
 		push!(losses, sum(loss_s)/n_samples)
 	end
 	return losses, model
@@ -607,16 +632,19 @@ push!(zz[1],"a")
 zz
 
 # ╔═╡ c03e26ef-f56f-4022-9197-e8c4d57c5d2d
-res_losses, res_model = train_model_batch(graph_labels_med[1:9],synthetic_feature_graphs_med[1:9],make_kgnn(5,3,3,4,3))
+res_losses, res_model = train_model(graph_labels_med[1:20],synthetic_feature_graphs_med[1:20],make_kgnn(4,3,3,4,5))
 
 # ╔═╡ 2c2be83e-3f59-4288-be2c-7df22c10c298
 train_model_batch(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(5,3,3,4,10))
 
 # ╔═╡ 149a7680-f634-414a-8324-109da1c10e18
-train_model_batch_mt(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(5,3,3,4,10),9)
+res_losses1, res_model1 = train_model_batch_mt(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(5,3,3,4,5),45)
 
 # ╔═╡ b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
 plot(res_losses)
+
+# ╔═╡ f2d3cb74-03dd-4e08-b6f0-d3d80730f4e4
+plot(res_losses1)
 
 # ╔═╡ 2aa717e4-a16c-4d98-a3bf-2f2f07dc76c4
 # ╠═╡ disabled = true
@@ -673,16 +701,30 @@ end
 a_new = reduce(gradient_accumulation!,a)
 
 # ╔═╡ de7c1f09-b8d1-4741-a163-1fcc22f2f017
-hidden_graph_view(res_model,12,12)
+hidden_graph_view(res_model1,5,5)
 
 # ╔═╡ b5580104-8a87-4115-91bb-b3d75148aaf9
-test_prediction = [1-(maximum(res_model(synthetic_feature_graphs_med[i])).==res_model(synthetic_feature_graphs_med[i])[2]) for i ∈ 90:length(synthetic_feature_graphs_med)]
+test_prediction = [1-(maximum(res_model1(synthetic_feature_graphs_med[i])).==res_model1(synthetic_feature_graphs_med[i])[2]) for i ∈ 90:length(synthetic_feature_graphs_med)]
 
 # ╔═╡ 15d6b88e-75e1-46ae-b6da-995d803e1599
 test = graph_labels_med[90:end]
 
 # ╔═╡ f346c057-5416-44d7-854d-e3da68626222
 mean(test_prediction.==test)
+
+# ╔═╡ 5d907a30-3716-4065-aff0-87432ca8d5af
+function hidden_graphs(finished_model)
+	n_hg = length(finished_model.layers[1])
+	nv = size(finished_model.layers[1].A_2)[1]
+	n_ef = size(finished_model.layers[1].A_2)[2]
+	n_nf = size(finished_model.layers[1].X_2)[2]
+
+	for i ∈ 1:n_hg
+		graph = hidden_graph_view(finished_model,5,5)
+		
+		adj = sum(graph[1][1:n_ef-1].*(graph[1][n_ef].<=0.5)
+
+		nf = graph[2].==stack([maximum(graph[2][i,:]) for i ∈ 1:nv])
 
 # ╔═╡ Cell order:
 # ╠═a0936f30-ff65-11ed-352c-c795c803f250
@@ -695,6 +737,7 @@ mean(test_prediction.==test)
 # ╠═2f3098ae-a36e-4d90-8241-32fe70259cb6
 # ╠═3370544e-76fb-4b15-b59a-1cae00d2e514
 # ╠═2a77361d-4872-4aa2-b63a-2d367bd16ec4
+# ╠═ec96964e-18ac-479b-8e2f-63baf0425411
 # ╠═d6df0686-dbe2-4c4f-a795-f90c24c35cb2
 # ╠═863ae18c-eb5e-45ab-ac0a-6ba0363a5603
 # ╠═35ed4380-8cf0-4193-9c9a-d497f0af344d
@@ -737,6 +780,7 @@ mean(test_prediction.==test)
 # ╠═2c2be83e-3f59-4288-be2c-7df22c10c298
 # ╠═149a7680-f634-414a-8324-109da1c10e18
 # ╠═b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
+# ╠═f2d3cb74-03dd-4e08-b6f0-d3d80730f4e4
 # ╠═2aa717e4-a16c-4d98-a3bf-2f2f07dc76c4
 # ╠═c0472846-94ac-4465-87e2-3ad97bd0ac4c
 # ╠═d0814d3f-3971-4eff-ab65-e79525d89107
@@ -747,3 +791,4 @@ mean(test_prediction.==test)
 # ╠═b5580104-8a87-4115-91bb-b3d75148aaf9
 # ╠═15d6b88e-75e1-46ae-b6da-995d803e1599
 # ╠═f346c057-5416-44d7-854d-e3da68626222
+# ╠═5d907a30-3716-4065-aff0-87432ca8d5af
