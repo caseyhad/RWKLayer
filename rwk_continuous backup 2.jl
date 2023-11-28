@@ -141,6 +141,19 @@ rwk_kron(g₁,g₂;l=5)
 # ╔═╡ 3370544e-76fb-4b15-b59a-1cae00d2e514
 MolecularGraphKernels.random_walk(ProductGraph{Direct}(g₁, g₂); l=5)
 
+# ╔═╡ d6df0686-dbe2-4c4f-a795-f90c24c35cb2
+function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
+	mx = zeros(Float32,sz,sz)
+	for i ∈ 1:sz
+		for j ∈ 1:sz
+			if j>i
+				mx[i,j] = 1
+			end
+		end
+	end
+	return mx
+end
+
 # ╔═╡ 2a77361d-4872-4aa2-b63a-2d367bd16ec4
 begin
 	struct KGNN <: AbstractGraphLayer
@@ -242,19 +255,6 @@ begin
 	function (l2::KGNN2)(fg::AbstractFeaturedGraph)
 	    return l2(global_feature(fg), node_feature(fg)')
 	end
-end
-
-# ╔═╡ d6df0686-dbe2-4c4f-a795-f90c24c35cb2
-function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
-	mx = zeros(Float32,sz,sz)
-	for i ∈ 1:sz
-		for j ∈ 1:sz
-			if j>i
-				mx[i,j] = 1
-			end
-		end
-	end
-	return mx
 end
 
 # ╔═╡ 863ae18c-eb5e-45ab-ac0a-6ba0363a5603
@@ -883,7 +883,7 @@ end
 # ╠═319b6b2f-0b17-4123-8c54-895db1ec2bf7
 # ╠═fd430464-1093-47b7-be83-d0fe14a87547
 # ╟─000a1031-fbfe-4891-a565-64d627a37a6d
-# ╠═8294c34a-f1a2-4571-8199-e78a41c22825
+# ╟─8294c34a-f1a2-4571-8199-e78a41c22825
 # ╠═4348d758-73cf-4575-819c-4759acb1622f
 # ╠═6a56f67b-9318-4fbf-a448-221e0cd6e522
 # ╠═a2dacd2a-acba-46fa-8919-70302c6541ac
@@ -917,6 +917,7 @@ end
 # ╠═149a7680-f634-414a-8324-109da1c10e18
 # ╠═b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
 # ╠═f2d3cb74-03dd-4e08-b6f0-d3d80730f4e4
+# ╠═2aa717e4-a16c-4d98-a3bf-2f2f07dc76c4
 # ╠═c0472846-94ac-4465-87e2-3ad97bd0ac4c
 # ╠═d0814d3f-3971-4eff-ab65-e79525d89107
 # ╠═8eae6cbe-b351-4cc2-a6bb-a112e811979e
