@@ -1,21 +1,22 @@
-import Pkg; Pkg.add("CSV")
-import Pkg; Pkg.add("Distributed")
-import Pkg; Pkg.add("DataFrames")
-import Pkg; Pkg.add("MolecularGraph")
-import Pkg; Pkg.add("MolecularGraphKernels")
-import Pkg; Pkg.add("MetaGraphs")
-import Pkg; Pkg.add("Flux")
-import Pkg; Pkg.add("Functors")
-import Pkg; Pkg.add("Zygote")
-import Pkg; Pkg.add("LinearAlgebra")
-import Pkg; Pkg.add("Statistics")
-import Pkg; Pkg.add("CUDA")
-import Pkg; Pkg.add("Graphs")
-import Pkg; Pkg.add("JLD2")
-import Pkg; Pkg.add("GeometricFlux")
-import Pkg; Pkg.add("Random")
+# import Pkg; Pkg.add("CSV")
+# import Pkg; Pkg.add("Distributed")
+# import Pkg; Pkg.add("DataFrames")
+# import Pkg; Pkg.add("MolecularGraph")
+# import Pkg; Pkg.add("MolecularGraphKernels")
+# import Pkg; Pkg.add("MetaGraphs")
+# import Pkg; Pkg.add("Flux")
+# import Pkg; Pkg.add("Functors")
+# import Pkg; Pkg.add("Zygote")
+# import Pkg; Pkg.add("LinearAlgebra")
+# import Pkg; Pkg.add("Statistics")
+# import Pkg; Pkg.add("CUDA")
+# import Pkg; Pkg.add("Graphs")
+# import Pkg; Pkg.add("JLD2")
+# import Pkg; Pkg.add("GeometricFlux")
+# import Pkg; Pkg.add("Random")
+# import Pkg; Pkg.add("BenchmarkTools")
 
-using CSV, Distributed, DataFrames, MolecularGraph, MolecularGraphKernels, MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Statistics, CUDA, Graphs, JLD2, GeometricFlux, Random
+using CSV, Distributed, DataFrames, MolecularGraph, MolecularGraphKernels, MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Statistics, CUDA, Graphs, JLD2, GeometricFlux, Random, BenchmarkTools
 
 function split_adjacency(g::MetaGraph,edge_labels)::Array{Float32}
     # Constructs an array of size n x n x l+1, where n is the number of nodes and l is the number of edge labels. each slice of the array is an adjaceny matrix of only edges of a specific label. The last slice of the array is reserved for the non-bonding pairs of vertice. Summing through the slices returns the adjacency matrix of a densly connected graph with no self-loops. 
@@ -62,105 +63,105 @@ function split_adjacency(fg::AbstractFeaturedGraph)::Array{Float32}
     return adj_layers
 end
 
-module LayerDefinition
+# module LayerDefinition
 
-using CSV, Distributed, DataFrames, MolecularGraph, MolecularGraphKernels, MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Statistics, CUDA, Graphs, JLD2, GeometricFlux, Random
-export make_kgnn, remote_calc, KGNN, l, upper_triang
+# using CSV, Distributed, DataFrames, MolecularGraph, MolecularGraphKernels, MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Statistics, CUDA, Graphs, JLD2, GeometricFlux, Random
+# export make_kgnn, remote_calc, KGNN, l, upper_triang
 
 
-struct KGNN <: AbstractGraphLayer
-    A_2 #Adjacency matrix of hidden graph
-    X_2 #Node features of hidden graph
-    num_edge_types  #Number of edge labels
-    p #Walk length hyperparameter
-    σ
-end
+# struct KGNN <: AbstractGraphLayer
+#     A_2 #Adjacency matrix of hidden graph
+#     X_2 #Node features of hidden graph
+#     num_edge_types  #Number of edge labels
+#     p #Walk length hyperparameter
+#     σ
+# end
 
-# Layer constructor with random initializations
-# Number of edge types does not include de-edges
-KGNNLayer(num_nodes, num_node_types, num_edge_types, p) = KGNN(
-    Float32.(rand(num_nodes, num_nodes, num_edge_types+1)), 
-    Float32.(rand(num_nodes,num_node_types)), 
-    Int(num_edge_types), 
-    Int(p), 
-    relu
-)
+# # Layer constructor with random initializations
+# # Number of edge types does not include de-edges
+# KGNNLayer(num_nodes, num_node_types, num_edge_types, p) = KGNN(
+#     Float32.(rand(num_nodes, num_nodes, num_edge_types+1)), 
+#     Float32.(rand(num_nodes,num_node_types)), 
+#     Int(num_edge_types), 
+#     Int(p), 
+#     relu
+# )
 
-@functor KGNN
+# @functor KGNN
 
-# normalized random walk layer, output ranges from [0,1]
-function (l::KGNN)(A, X)::Float32
+# # normalized random walk layer, output ranges from [0,1]
+# function (l::KGNN)(A, X)::Float32
 
-    nv = size(l.A_2)[1] # number of vertices
+#     nv = size(l.A_2)[1] # number of vertices
     
-    n_edge_types = size(l.A_2)[3] # number of edge labels
+#     n_edge_types = size(l.A_2)[3] # number of edge labels
 
-    A_norm_mx = Zygote.@ignore upper_triang(nv)
+#     A_norm_mx = Zygote.@ignore upper_triang(nv)
 
-    # Deletions of the self loops and copying upper triangle to the lower triangle to make symmetric. The final product resembles the "split adjacency"
-    A_2_herm = stack([relu.((l.A_2[:,:,i].*A_norm_mx)+(l.A_2[:,:,i].*A_norm_mx)') for i ∈ 1:n_edge_types])
+#     # Deletions of the self loops and copying upper triangle to the lower triangle to make symmetric. The final product resembles the "split adjacency"
+#     A_2_herm = stack([relu.((l.A_2[:,:,i].*A_norm_mx)+(l.A_2[:,:,i].*A_norm_mx)') for i ∈ 1:n_edge_types])
 
-    id = Matrix{Float32}(I, nv, nv) |> (isa(l.A_2, CuArray) ? gpu : cpu) # identity matrix on cpu or fpu depending on which is being used
+#     id = Matrix{Float32}(I, nv, nv) |> (isa(l.A_2, CuArray) ? gpu : cpu) # identity matrix on cpu or fpu depending on which is being used
     
-    A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+id for i ∈ 1:n_edge_types]) # a slice of this matrix houses the sum of an edge label vector for each edge. the identity matrix is added to avoid dividing by 0 on the main daigonal. The matrix is copied for each slice to match dimensions of A_2_herm
+#     A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+id for i ∈ 1:n_edge_types]) # a slice of this matrix houses the sum of an edge label vector for each edge. the identity matrix is added to avoid dividing by 0 on the main daigonal. The matrix is copied for each slice to match dimensions of A_2_herm
     
-    A_2_norm = A_2_herm#./A_2_adj # result - all edge feature vectors sum to 1
+#     A_2_norm = A_2_herm#./A_2_adj # result - all edge feature vectors sum to 1
 
-    # same result as edge features except for node features
-    X_2_norm = relu.(l.X_2)#./sum([l.X_2[:,i] for i ∈ 1:l.num_edge_types])
+#     # same result as edge features except for node features
+#     X_2_norm = relu.(l.X_2)#./sum([l.X_2[:,i] for i ∈ 1:l.num_edge_types])
     
 
-    # inner product normalization - k(x,y)/(k(x,x)*k(y,y))^.5
-    return sum((vec(X*X_2_norm')*vec(X*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)/(sum((vec(X*X')*vec(X*X')'.*sum([kron(A[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)*sum((vec(X_2_norm*X_2_norm')*vec(X_2_norm*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A_2_norm[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p))^.5
+#     # inner product normalization - k(x,y)/(k(x,x)*k(y,y))^.5
+#     return sum((vec(X*X_2_norm')*vec(X*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)/(sum((vec(X*X')*vec(X*X')'.*sum([kron(A[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)*sum((vec(X_2_norm*X_2_norm')*vec(X_2_norm*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A_2_norm[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p))^.5
 
-end
+# end
 
-function (l::KGNN)(fg::AbstractFeaturedGraph)
-    return l(global_feature(fg), node_feature(fg)')
-end
+# function (l::KGNN)(fg::AbstractFeaturedGraph)
+#     return l(global_feature(fg), node_feature(fg)')
+# end
 
-function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
-    mx = zeros(Float32,sz,sz)
-    for i ∈ 1:sz
-        for j ∈ 1:sz
-            if j>i
-                mx[i,j] = 1
-            end
-        end
-    end
-    return mx
-end
+# function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
+#     mx = zeros(Float32,sz,sz)
+#     for i ∈ 1:sz
+#         for j ∈ 1:sz
+#             if j>i
+#                 mx[i,j] = 1
+#             end
+#         end
+#     end
+#     return mx
+# end
 
-function remote_calc(model,tuple)
+# function remote_calc(model,tuple)
     
-    x, y = tuple
+#     x, y = tuple
 
-    loss, grads = Flux.withgradient(model) do m
+#     loss, grads = Flux.withgradient(model) do m
     
-        y_hat = m(x)
-        Flux.mse(y_hat, y)
+#         y_hat = m(x)
+#         Flux.mse(y_hat, y)
         
-    end
-    return (;loss, grads)
-end
+#     end
+#     return (;loss, grads)
+# end
 
-function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_graphs)
-    model = Chain(
-        Parallel(vcat, 
-            [KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
-        ),
-        Dense(n_hidden_graphs => 4, tanh),
-        Dense(4 => 4, tanh),
-        #Dropout(0.2),
-        Dense(4 => 2, tanh),
-        softmax,
-    )
-    return model
-end
+# function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_graphs)
+#     model = Chain(
+#         Parallel(vcat, 
+#             [KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
+#         ),
+#         Dense(n_hidden_graphs => 4, tanh),
+#         Dense(4 => 4, tanh),
+#         #Dropout(0.2),
+#         Dense(4 => 2, tanh),
+#         softmax,
+#     )
+#     return model
+# end
 
 
 
-end
+# end
 
 function recursive_addition!(a, b)
     if isa(a, Number)
@@ -242,7 +243,7 @@ function train_model_batch_dist(class_labels, graph_vector, model, batch_sz, n, 
 
 	for epoch in 1:n
 
-		batches = Base.Iterators.partition(shuffle(collect(data_class)), 3)
+		batches = Base.Iterators.partition(shuffle(collect(data_class)), batch_sz)
 		epoch_loss = 0
 		
 		for batch ∈ batches
@@ -267,8 +268,8 @@ end
 
 ##end of function definitions##
 
-
-@everywhere using .LayerDefinition
+#@everywhere import .LayerDefinition
+@everywhere include("remote_calc.jl")
 
 data = CSV.read(Base.download("https://github.com/SimonEnsemble/graph-kernel-SVM-for-toxicity-of-pesticides-to-bees/raw/main/BeeToxAI%20Data/File%20S1%20Acute%20contact%20toxicity%20dataset%20for%20classification.csv"),DataFrame)
 
@@ -294,10 +295,14 @@ btx_featuredgraphs = mg_to_fg(btx_graphs,labels.edge_labels,labels.vertex_labels
 
 graph_classes = btx_class_labels[[i ∉[errored_smiles[i][1] for i ∈ 1:length(errored_smiles)] for i in 1:length(btx_class_labels)]]
 
-btx_losses,btx_model = train_model_batch_dist(graph_classes[1:40],btx_featuredgraphs[1:40],make_kgnn(8,12,4,4,10), 6, 10,.1);
+training_data = shuffle(collect(zip(btx_featuredgraphs,graph_classes)))[1:Int(round(0.8*length(btx_featuredgraphs)))]
+training_graphs = getindex.(training_data,1)
+training_classes = getindex.(training_data,2)
 
-@save pwd()*"\\btx_losses.jld2" btx_losses
-@save pwd()*"\\btx_model.jld2" btx_model
+@time btx_losses,btx_model = train_model_batch_dist(training_classes,training_graphs,make_kgnn(6,12,4,4,10), 5, 10, .1)
+
+#@save pwd()*"\\btx_losses.jld2" btx_losses
+#@save pwd()*"\\btx_model.jld2" btx_model
 
 
 

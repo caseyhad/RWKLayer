@@ -1,7 +1,4 @@
-import Pkg
-	Pkg.activate()
-
-using MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Plots, GeometricFlux, PlutoUI, JLD2, Graphs, Random, CUDA, Statistics, CSV, DataFrames, MolecularGraph, MolecularGraphKernels, Distributed
+using CSV, Distributed, DataFrames, MolecularGraph, MolecularGraphKernels, MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Statistics, CUDA, Graphs, JLD2, GeometricFlux, Random, BenchmarkTools
 
 struct KGNN <: AbstractGraphLayer
     A_2 #Adjacency matrix of hidden graph

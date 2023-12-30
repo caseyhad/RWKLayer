@@ -291,7 +291,7 @@ function find_labels(graph_vector)
 end
 
 # ╔═╡ 98f48ded-4129-47d5-badd-a794f09d42cb
-begin
+begin #Training Data Preparation
 	data = CSV.read(Base.download("https://github.com/SimonEnsemble/graph-kernel-SVM-for-toxicity-of-pesticides-to-bees/raw/main/BeeToxAI%20Data/File%20S1%20Acute%20contact%20toxicity%20dataset%20for%20classification.csv"),DataFrame)
 
 	btx_class_labels = [data[i,:Outcome] == "Toxic" for i ∈ 1:length(data[:,:Outcome])]
@@ -314,10 +314,9 @@ begin
 
 	btx_featuredgraphs = mg_to_fg(btx_graphs,labels.edge_labels,labels.vertex_labels)
 
-end
+	graph_classes = btx_class_labels[[i ∉[errored_smiles[i][1] for i ∈ 1:length(errored_smiles)] for i in 1:length(btx_class_labels)]]
 
-# ╔═╡ 4d2c02fb-1a7c-435d-8a2d-f058f8442fba
-graph_classes = btx_class_labels[[i ∉[errored_smiles[i][1] for i ∈ 1:length(errored_smiles)] for i in 1:length(btx_class_labels)]]
+end
 
 # ╔═╡ 3e4c206d-0fb7-4fd7-bf0f-ec2f40109f8e
 function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_graphs)
@@ -387,51 +386,6 @@ function train_model_batch_mt(class_labels,graph_vector,model, batch_sz)
 	return losses, model
 end
 
-# ╔═╡ 6febe4b5-1770-42f9-98a0-95befa84508d
-#btx_losses, btx_model= train_model_batch_mt(graph_classes[1:90],btx_featuredgraphs[1:90],make_kgnn(6,12,4,4,8),32)
-
-# ╔═╡ f342e320-3bc0-4a5d-9dc0-1479b827e9f3
-plot(btx_losses)
-
-# ╔═╡ 1794f38a-ba9c-4332-8710-a683addd18c1
-btx_model.layers[1][1]
-
-# ╔═╡ 75c25f96-8fe8-4c65-a3c6-59e58f71152a
-hidden_graph_view2(btx_model, 5)
-
-# ╔═╡ 3f07d95a-bccb-405d-b062-f361af3fc31d
-begin
-	test_prediction = [1-(maximum(btx_model(btx_featuredgraphs[i])).==btx_model(btx_featuredgraphs[i])[2]) for i ∈ 1:90]
-
-	test = btx_class_labels[1:90]
-
-	tp = sum([test_prediction[i]==1&&test[i]==1 for i ∈ 1:length(test)])
-
-	tn = sum([test_prediction[i]==0&&test[i]==0 for i ∈ 1:length(test)])
-
-	fp = sum([test_prediction[i]==1&&test[i]==0 for i ∈ 1:length(test)])
-
-	fn = sum([test_prediction[i]==0&&test[i]==1 for i ∈ 1:length(test)])
-	
-	pre = tp/(tp+fp)
-
-	rec = tp/(tp+fn)
-
-	acc = mean(test_prediction.==test)
-
-	f1 = 2*tp/(2*tp+fp+fn)
-
-end
-
-# ╔═╡ ba6c41b4-a1b6-49ba-894a-35f0495d44a0
-f1
-
-# ╔═╡ 12ba95cd-f221-4d2a-a022-ad231188bfb4
-btx_featuredgraphs
-
-# ╔═╡ 869d338e-59c7-404c-a49f-7f6793d813d4
-btx_class_labels
-
 # ╔═╡ Cell order:
 # ╠═def5bc20-8835-4484-82ca-1cee86d9a34e
 # ╠═522c0377-b1f5-4768-9db8-9a7bec01311a
@@ -444,14 +398,5 @@ btx_class_labels
 # ╠═56404800-8f83-4a28-b693-70abbccdc193
 # ╠═fb88fdc4-e5f1-4632-b0f6-72acff41def5
 # ╠═98f48ded-4129-47d5-badd-a794f09d42cb
-# ╠═4d2c02fb-1a7c-435d-8a2d-f058f8442fba
 # ╠═3e4c206d-0fb7-4fd7-bf0f-ec2f40109f8e
 # ╠═c6e2f254-5bad-453e-88c6-b2c3f0f91a00
-# ╠═6febe4b5-1770-42f9-98a0-95befa84508d
-# ╠═f342e320-3bc0-4a5d-9dc0-1479b827e9f3
-# ╠═1794f38a-ba9c-4332-8710-a683addd18c1
-# ╠═75c25f96-8fe8-4c65-a3c6-59e58f71152a
-# ╠═3f07d95a-bccb-405d-b062-f361af3fc31d
-# ╠═ba6c41b4-a1b6-49ba-894a-35f0495d44a0
-# ╠═12ba95cd-f221-4d2a-a022-ad231188bfb4
-# ╠═869d338e-59c7-404c-a49f-7f6793d813d4
