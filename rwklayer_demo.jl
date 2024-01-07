@@ -8,8 +8,19 @@ using InteractiveUtils
 begin
 	import Pkg
 	Pkg.activate()
-	using MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Plots, GeometricFlux, PlutoUI, JLD2, Graphs, Random, CUDA, Statistics, CSV, DataFrames, MolecularGraph, MolecularGraphKernels
+	using MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Plots, GeometricFlux, PlutoUI, JLD2, Graphs, Random, CUDA, Statistics, CSV, DataFrames, MolecularGraph, MolecularGraphKernels, BenchmarkTools, Distributed
 	TableOfContents(title="Random walk layer w/ edge labels")
+end
+
+# ╔═╡ b01bcf77-efb2-41db-bd16-dd285ba090e0
+device = gpu
+
+# ╔═╡ ae30e674-5e45-461a-9249-33ac79e44fd6
+function kron2d(A, B)
+    A4 = reshape(A, 1, size(A, 1), 1, size(A, 2))
+    B4 = reshape(B, size(B, 1), 1, size(B, 2), 1)
+    C4 = A4 .* B4
+    C = reshape(C4, size(A, 1) * size(B, 1), size(A, 2) * size(B, 2))
 end
 
 # ╔═╡ 522c0377-b1f5-4768-9db8-9a7bec01311a
@@ -60,19 +71,6 @@ begin
 	end
 end
 
-# ╔═╡ 10cdfcd0-d2e7-4ca6-a113-f944b1ddb99c
-function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
-	mx = zeros(Float32,sz,sz)
-	for i ∈ 1:sz
-		for j ∈ 1:sz
-			if j>i
-				mx[i,j] = 1
-			end
-		end
-	end
-	return mx
-end
-
 # ╔═╡ 1bf932f8-05c6-4237-962c-9e99c5c29004
 begin
 	struct KGNN <: AbstractGraphLayer
@@ -90,7 +88,7 @@ begin
 		Float32.(rand(num_nodes,num_node_types)), 
 		Int(num_edge_types), 
 		Int(p), 
-		relu
+		σ
 	)
 	
 	@functor KGNN
@@ -102,29 +100,48 @@ begin
 		
 		n_edge_types = size(l.A_2)[3] # number of edge labels
 
-		A_norm_mx = Zygote.@ignore upper_triang(nv)
+		A_norm_mx = Zygote.@ignore upper_triang(nv)|> (isa(l.A_2, CuArray) ? gpu : cpu)
 
-		# Deletions of the self loops and copying upper triangle to the lower triangle to make symmetric. The final product resembles the "split adjacency"
-		A_2_herm = stack([relu.((l.A_2[:,:,i].*A_norm_mx)+(l.A_2[:,:,i].*A_norm_mx)') for i ∈ 1:n_edge_types])
+		A_2_herm = stack([l.σ.((l.A_2[:,:,i].*A_norm_mx)+(l.A_2[:,:,i].*A_norm_mx)') for i ∈ 1:n_edge_types])
 
-		id = Matrix{Float32}(I, nv, nv) |> (isa(l.A_2, CuArray) ? gpu : cpu) # identity matrix on cpu or fpu depending on which is being used
+		id = Matrix{Float32}(I, nv, nv) |> (isa(l.A_2, CuArray) ? gpu : cpu)
 		
-		A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+id for i ∈ 1:n_edge_types]) # a slice of this matrix houses the sum of an edge label vector for each edge. the identity matrix is added to avoid dividing by 0 on the main daigonal. The matrix is copied for each slice to match dimensions of A_2_herm
+		#A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+id for i ∈ 1:n_edge_types])
 		
-		A_2_norm = A_2_herm#./A_2_adj # result - all edge feature vectors sum to 1
+		A_2_norm = A_2_herm#./A_2_adj
 
-		# same result as edge features except for node features
-		X_2_norm = relu.(l.X_2)#./sum([l.X_2[:,i] for i ∈ 1:l.num_edge_types])
+		X_2_norm = l.σ.(l.X_2)#./sum([l.σ.(l.X_2)[:,i] for i ∈ 1:l.num_edge_types])
+
+		node_wts = vec(X*X_2_norm')*vec(X*X_2_norm')'
+
+		edge_kron = sum([kron2d(A_2_norm[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types])
 		
+		k_xy = sum((node_wts.*edge_kron)^l.p)
+		
+		k_xx = sum((vec(X*X')*vec(X*X')'.*sum([kron2d(A[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)
+			
+		k_yy = sum((vec(X_2_norm*X_2_norm')*vec(X_2_norm*X_2_norm')'.*sum([kron2d(A_2_norm[:,:,i],A_2_norm[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)
 
-		# inner product normalization - k(x,y)/(k(x,x)*k(y,y))^.5
-		return sum((vec(X*X_2_norm')*vec(X*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)/(sum((vec(X*X')*vec(X*X')'.*sum([kron(A[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)*sum((vec(X_2_norm*X_2_norm')*vec(X_2_norm*X_2_norm')'.*sum([kron(A_2_norm[:,:,i],A_2_norm[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p))^.5
+		return k_xy/(k_xx*k_xy)^.5
 	
 	end
 	
 	function (l::KGNN)(fg::AbstractFeaturedGraph)
 	    return l(global_feature(fg), node_feature(fg)')
 	end
+end
+
+# ╔═╡ 10cdfcd0-d2e7-4ca6-a113-f944b1ddb99c
+function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
+	mx = zeros(Float32,sz,sz)
+	for i ∈ 1:sz
+		for j ∈ 1:sz
+			if j>i
+				mx[i,j] = 1
+			end
+		end
+	end
+	return mx
 end
 
 # ╔═╡ 48fb7ca7-0acc-4c42-95d4-45f22ecd3817
@@ -290,6 +307,127 @@ function find_labels(graph_vector)
 	return (vertex_labels = sort(unique(vertex_labels)),edge_labels = sort(unique(edge_labels)))
 end
 
+# ╔═╡ 7d785b2f-7164-4b46-8717-3a115b5b2b31
+function batch_graphs(batch)
+	graphs = []
+	classes = []
+
+	for (x,y) ∈ batch
+		push!(graphs,x)
+		push!(classes,y)
+	end
+	
+	nf = hcat([fg.nf.signal for fg ∈ graphs]...)
+	ef = hcat([fg.ef.signal for fg ∈ graphs]...)
+	final_size = size(nf)[2]
+	n_ef = size(ef)[1]
+
+	Ã = zeros(final_size,final_size,n_ef+1)
+	n_ct = 1
+	for graph ∈ graphs
+		nv = size(graph.nf.signal)[2]
+		Ã[n_ct:n_ct+nv-1,n_ct:n_ct+nv-1,:] = graph.gf.signal
+		n_ct += nv
+	end
+
+	adjm = sum([Ã[:,:,o] for o ∈ 1:size(Ã)[3]-1])
+	return (FeaturedGraph(adjm; nf=nf, ef=ef, gf = Ã), mean(stack(classes),dims = 2))
+end
+
+# ╔═╡ 3e4c206d-0fb7-4fd7-bf0f-ec2f40109f8e
+function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_graphs)
+	model = Chain(
+		Parallel(vcat, 
+			[KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
+		),device,
+		Dense(n_hidden_graphs => 4, tanh),
+	    Dense(4 => 4, tanh),
+		#Dropout(0.2),
+		Dense(4 => 2, tanh),
+		softmax,
+	)
+	return model
+end
+
+# ╔═╡ e92f150b-fc55-45c5-b195-a7feb79dc413
+function train_model_batch_dist(class_labels, graph_vector, model, batch_sz, n, lr,)
+	#good values: n = 900, lr = .1
+
+	n_samples = length(graph_vector)
+	oh_class = Flux.onehotbatch(class_labels, [true, false])
+	data_class = zip(graph_vector, [oh_class[:,i] for i ∈ 1:n_samples])
+
+	optim = Flux.setup(Flux.Adam(lr/n_samples), model)
+	
+	losses = []
+
+	for epoch in 1:n
+
+		batches = Base.Iterators.partition(shuffle(collect(data_class)), 3) |> device
+		epoch_loss = 0
+		
+		for batch ∈ batches
+
+            results = map(batch) do (x,y)
+                loss, grads = Flux.withgradient(model) do m
+    
+			        y_hat = m(x)
+			        Flux.mse(y_hat, y)
+			        
+			    end
+			    return (;loss, grads)
+			end
+			
+			epoch_loss += sum([results[i].loss for i ∈ eachindex(results)])
+			grads_s = [results[i].grads for i ∈ eachindex(results)]
+			
+			∇ = reduce(add_gradients, grads_s|>cpu)
+
+			Flux.update!(optim, model, ∇[1]|>device)
+		end
+
+		push!(losses, epoch_loss/n_samples)
+	end
+	return losses, model
+end
+
+# ╔═╡ 7132824a-fdfe-4443-ad96-23bd7e188c03
+function train_model_graph_batch(class_labels, graph_vector, model, batch_sz, n, lr,)
+	#good values: n = 900, lr = .1
+
+	n_samples = length(graph_vector)
+	oh_class = Flux.onehotbatch(class_labels, [true, false])
+	data_class = zip(graph_vector, [oh_class[:,i] for i ∈ 1:n_samples])
+
+	optim = Flux.setup(Flux.Adam(lr/n_samples), model)
+	
+	losses = []
+
+	for epoch in 1:n
+
+		batches = Base.Iterators.partition(shuffle(collect(data_class)), batch_sz)
+		
+		for batch ∈ batches
+
+			(x,y) = batch_graphs(batch) |> device
+			
+			loss, grads = Flux.withgradient(model) do m
+
+				y_hat = m(x)
+				Flux.mse(y_hat, y)
+				
+			end
+			push!(losses, loss)
+			Flux.update!(optim, model, grads[1]|>device)
+		end
+
+	end
+	return losses, model
+end
+
+# ╔═╡ 1a1f354d-a105-410f-b5aa-d4b38ecbacba
+#train_model_graph_batch(graph_classes, btx_featuredgraphs, make_kgnn(8,12,4,4,4)|>device,1,1,.1)
+
 # ╔═╡ 98f48ded-4129-47d5-badd-a794f09d42cb
 begin #Training Data Preparation
 	data = CSV.read(Base.download("https://github.com/SimonEnsemble/graph-kernel-SVM-for-toxicity-of-pesticides-to-bees/raw/main/BeeToxAI%20Data/File%20S1%20Acute%20contact%20toxicity%20dataset%20for%20classification.csv"),DataFrame)
@@ -318,76 +456,52 @@ begin #Training Data Preparation
 
 end
 
-# ╔═╡ 3e4c206d-0fb7-4fd7-bf0f-ec2f40109f8e
-function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_graphs)
-	model = Chain(
-		Parallel(vcat, 
-			[KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
-		),
-		Dense(n_hidden_graphs => 4, tanh),
-	    Dense(4 => 4, tanh),
-		#Dropout(0.2),
-		Dense(4 => 2, tanh),
-		softmax,
-	)
-	return model
+# ╔═╡ abbee389-8f95-4840-b9ef-a0417a5c576b
+begin
+	shuffled_data = shuffle(collect(zip(btx_featuredgraphs,graph_classes)))
+    training_data = shuffled_data[1:Int(round(0.8*length(btx_featuredgraphs)))]
+	training_graphs = getindex.(training_data,1)
+	training_classes = getindex.(training_data,2)
 end
 
-# ╔═╡ c6e2f254-5bad-453e-88c6-b2c3f0f91a00
-function train_model_batch_mt(class_labels,graph_vector,model, batch_sz)
-	#good values: n = 900, lr = .1
-	n = 4000
-	lr = .1
-	target = Flux.onehotbatch(class_labels, [true, false])
-	loader = []
-	n_samples = length(graph_vector)
-	
-	for i ∈ 1:n_samples
-		push!(loader,(graph_vector[i],target[:,i]))
-	end
+# ╔═╡ f1b95c7c-a9be-4e87-b53b-1c5698d7c647
+begin
+	#@time train_model_batch_dist(training_classes, training_graphs, make_kgnn(8,12,4,4,12)|>device,1,1,.15)
+	btx_losses, btx_model = train_model_batch_dist(training_classes, training_graphs, make_kgnn(6,12,4,4,12)|>device,1,600,.15)
+end
 
-	optim = Flux.setup(Flux.Adam(lr/n_samples), model)
-	
-	losses = []
+# ╔═╡ 00c53749-30f3-4a78-b18b-38f0ac80afa3
+#plot(btx_losses)
 
-	threads = Threads.nthreads()
+# ╔═╡ d704a940-5c9b-4767-9935-58d649f1bd83
+begin
+	predictions = btx_model.(btx_featuredgraphs|>device)|>cpu
 
-	for epoch in 1:n
+end
 
-		randomize = randperm(length(collect(1:n_samples)))
-		batches = collect(Base.Iterators.partition(randomize,batch_sz))
-		
-		grads_s = [Vector{Any}() for i ∈ 1:threads]
-		loss_s = zeros(threads)
-		
-		for batch ∈ batches
-			Threads.@threads for (x, y) in loader[batch]
-				threadid = Threads.threadid()
-				
-					loss, grads = Flux.withgradient(model) do m
-					
-						y_hat = m(x)
-			            Flux.mse(y_hat, y)
-						
-					end
-				
-				loss_s[threadid] += loss
-				push!(grads_s[threadid],grads)
-	
-				grads_s[threadid] = [reduce(add_gradients, grads_s[threadid])]
-			end
-			∇ = reduce(add_gradients, reduce(vcat,grads_s))
-		
-			Flux.update!(optim, model, ∇[1])
-		end
+# ╔═╡ 08aaa186-3a71-4592-b0e2-89b79a4ecc74
+pred_vector = reduce(hcat,predictions)
 
-		push!(losses, sum(loss_s)/n_samples)
-	end
-	return losses, model
+# ╔═╡ 1e68fcdd-8853-415c-98dc-0a9b6d1aa36b
+pred_bool = [pred_vector[1,i].==maximum(pred_vector[:,i]) for i ∈ 1:size(pred_vector)[2]]
+
+# ╔═╡ e567fae4-0882-4bfe-81dd-d386a32ba357
+graph_classes
+
+# ╔═╡ 35e95976-383e-4814-a02f-5d4b9169561f
+begin
+    btx_model_cpu = btx_model|>cpu
+    btx_losses_cpu = btx_losses|>cpu
+    plot(btx_losses_cpu)
+	correct_vector = [pred_bool[i].==graph_classes[i] for i ∈ 1:length(graph_classes)]
+	@save "C:\\Users\\dcase\\RWKLayer\\btx_losses_cpu.jld2" btx_losses_cpu
+	@save "C:\\Users\\dcase\\RWKLayer\\btx_model_cpu.jld2" btx_model_cpu
 end
 
 # ╔═╡ Cell order:
 # ╠═def5bc20-8835-4484-82ca-1cee86d9a34e
+# ╠═b01bcf77-efb2-41db-bd16-dd285ba090e0
+# ╠═ae30e674-5e45-461a-9249-33ac79e44fd6
 # ╠═522c0377-b1f5-4768-9db8-9a7bec01311a
 # ╠═1bf932f8-05c6-4237-962c-9e99c5c29004
 # ╠═10cdfcd0-d2e7-4ca6-a113-f944b1ddb99c
@@ -397,6 +511,17 @@ end
 # ╠═e5b410af-a936-45ad-86e2-5f6799b67690
 # ╠═56404800-8f83-4a28-b693-70abbccdc193
 # ╠═fb88fdc4-e5f1-4632-b0f6-72acff41def5
-# ╠═98f48ded-4129-47d5-badd-a794f09d42cb
+# ╠═7d785b2f-7164-4b46-8717-3a115b5b2b31
 # ╠═3e4c206d-0fb7-4fd7-bf0f-ec2f40109f8e
-# ╠═c6e2f254-5bad-453e-88c6-b2c3f0f91a00
+# ╠═e92f150b-fc55-45c5-b195-a7feb79dc413
+# ╠═7132824a-fdfe-4443-ad96-23bd7e188c03
+# ╠═1a1f354d-a105-410f-b5aa-d4b38ecbacba
+# ╠═98f48ded-4129-47d5-badd-a794f09d42cb
+# ╠═abbee389-8f95-4840-b9ef-a0417a5c576b
+# ╠═f1b95c7c-a9be-4e87-b53b-1c5698d7c647
+# ╠═00c53749-30f3-4a78-b18b-38f0ac80afa3
+# ╠═d704a940-5c9b-4767-9935-58d649f1bd83
+# ╠═08aaa186-3a71-4592-b0e2-89b79a4ecc74
+# ╠═1e68fcdd-8853-415c-98dc-0a9b6d1aa36b
+# ╠═e567fae4-0882-4bfe-81dd-d386a32ba357
+# ╠═35e95976-383e-4814-a02f-5d4b9169561f
