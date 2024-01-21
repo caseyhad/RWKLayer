@@ -30,8 +30,7 @@ begin
 		
 		nv = size(g)[1] # number of vertices
 		nt = length(edge_labels) # number of edge types  
-		adj_layers = zeros(Float32,nv, nv, nt+1) # the extra level at the bottom is the non-edges (1-A)
-		adj_layers[:,:,nt+1] = ones(nv,nv).-Matrix{Float32}(I, nv, nv)
+		adj_layers = zeros(Float32,nv, nv, nt) # the extra level at the bottom is the non-edges (1-A)
 
 		# check each edge for a label matching the current slice of the split adjacency matrix
 		for l ∈ eachindex(edge_labels)
@@ -39,8 +38,6 @@ begin
 				if get_prop(g, edge, :label) == edge_labels[l]
 					# add the edge to the matrix and delete the non-edge from the last layer
 					adj_layers[src(edge),dst(edge),l] = 1.0
-					adj_layers[src(edge),dst(edge),nt+1] = 0
-					adj_layers[dst(edge),src(edge),nt+1] = 0
 				end
 			end
 			# make symmetric
@@ -51,83 +48,19 @@ begin
 	end
 	# converts R^2 adjacency matrix into an R^3 array where each layer is an adjacency matrix for only one edge feature
 	function split_adjacency(fg::AbstractFeaturedGraph)::Array{Float32}
-		ef = fg.ef.signal
+		ef = fg.ef.signal # edge features from featuredGraph
 		nv = size(fg.nf.signal)[2]
 		ne = size(ef)[2]
-		nt = size(ef)[1]
+		nt = size(ef)[1] # number of edge types
 		edge_array = [edge for edge ∈ edges(fg)][1:ne]
-		adj_layers = zeros(Float32, nv, nv, nt+1)
-		adj_layers[:,:,nt+1] = ones(nv,nv).-Matrix{Float32}(I, nv, nv)
+		adj_layers = zeros(Float32, nv, nv, nt)
 		for edge_idx ∈ eachindex(edge_array)
 			v₁,v₂ = edge_array[edge_idx][2]
 
 			adj_layers[v₁,v₂,1:nt] .= ef[:,edge_idx]
 			adj_layers[v₂,v₁,1:nt] .= ef[:,edge_idx]
-			
-			adj_layers[v₂,v₁,nt+1] = 0
-			adj_layers[v₁,v₂,nt+1] = 0
 		end
 		return adj_layers
-	end
-end
-
-# ╔═╡ 1bf932f8-05c6-4237-962c-9e99c5c29004
-begin
-	struct KGNN <: AbstractGraphLayer
-	    A_2 #Adjacency matrix of hidden graph
-		X_2 #Node features of hidden graph
-		num_edge_types  #Number of edge labels
-		p #Walk length hyperparameter
-	    σ
-	end
-
-	# Layer constructor with random initializations
-	# Number of edge types does not include de-edges
-	KGNNLayer(num_nodes, num_node_types, num_edge_types, p) = KGNN(
-		Float32.(rand(num_nodes, num_nodes, num_edge_types+1)), 
-		Float32.(rand(num_nodes,num_node_types)), 
-		Int(num_edge_types), 
-		Int(p), 
-		σ
-	)
-	
-	@functor KGNN
-
-	# normalized random walk layer, output ranges from [0,1]
-	function (l::KGNN)(A, X)::Float32
-
-		nv = size(l.A_2)[1] # number of vertices
-		
-		n_edge_types = size(l.A_2)[3] # number of edge labels
-
-		A_norm_mx = Zygote.@ignore upper_triang(nv)|> (isa(l.A_2, CuArray) ? gpu : cpu)
-
-		A_2_herm = stack([l.σ.((l.A_2[:,:,i].*A_norm_mx)+(l.A_2[:,:,i].*A_norm_mx)') for i ∈ 1:n_edge_types])
-
-		id = Matrix{Float32}(I, nv, nv) |> (isa(l.A_2, CuArray) ? gpu : cpu)
-		
-		#A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+id for i ∈ 1:n_edge_types])
-		
-		A_2_norm = A_2_herm#./A_2_adj
-
-		X_2_norm = l.σ.(l.X_2)#./sum([l.σ.(l.X_2)[:,i] for i ∈ 1:l.num_edge_types])
-
-		node_wts = vec(X*X_2_norm')*vec(X*X_2_norm')'
-
-		edge_kron = sum([kron2d(A_2_norm[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types])
-		
-		k_xy = sum((node_wts.*edge_kron)^l.p)
-		
-		k_xx = sum((vec(X*X')*vec(X*X')'.*sum([kron2d(A[:,:,i],A[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)
-			
-		k_yy = sum((vec(X_2_norm*X_2_norm')*vec(X_2_norm*X_2_norm')'.*sum([kron2d(A_2_norm[:,:,i],A_2_norm[:,:,i]) for i ∈ 1:l.num_edge_types]))^l.p)
-
-		return k_xy/(k_xx*k_xy)^.5
-	
-	end
-	
-	function (l::KGNN)(fg::AbstractFeaturedGraph)
-	    return l(global_feature(fg), node_feature(fg)')
 	end
 end
 
@@ -142,6 +75,54 @@ function upper_triang(sz) # generates an n x n matrix where the upper triangle i
 		end
 	end
 	return mx
+end
+
+# ╔═╡ 1bf932f8-05c6-4237-962c-9e99c5c29004
+begin
+	struct KGNN <: AbstractGraphLayer
+	    h_adj # A djacency matrix of hidden graph
+		h_nf # Number of node features
+		n_ef  # Number of edge features
+		p # Walk length hyperparameter
+	    σ # activation function for graph features, sigmoid/relu both work equally
+	end
+
+	# Layer constructor with random initializations
+	# Number of edge types does not include de-edges
+	KGNNLayer(num_nodes, num_node_types, num_edge_types, p) = KGNN(
+		Float32.(rand(num_nodes, num_nodes, num_edge_types)), 
+		Float32.(rand(num_nodes,num_node_types)), 
+		Int(num_edge_types), 
+		Int(p), 
+		σ
+	)
+	
+	@functor KGNN
+
+	# normalized random walk layer, output ranges from [0,1]
+	function (l::KGNN)(A, X)::Float32
+
+		nv = size(l.h_adj)[1] # number of vertices
+
+		adj_reg_mx = Zygote.@ignore upper_triang(nv)|> (isa(l.h_adj, CuArray) ? gpu : cpu) # upper triangle matrix with diag 0
+
+		h_adj_r = stack([l.σ.((l.h_adj[:,:,i].*adj_reg_mx)+(l.h_adj[:,:,i].*adj_reg_mx)') for i ∈ 1:l.n_ef]) # make each layer a square matrix, apply activation
+		
+		h_nf_r = l.σ.(l.h_nf)
+		
+		k_xy = sum((vec(X*h_nf_r')*vec(X*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],A[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # random walk kernel calculation between input and hidden
+		
+		k_xx = sum((vec(X*X')*vec(X*X')'.*sum([kron2d(A[:,:,i],A[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # " input and input
+			
+		k_yy = sum((vec(h_nf_r*h_nf_r')*vec(h_nf_r*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],h_adj_r[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # " hidden and hidden
+
+		return k_xy/(k_xx*k_yy)^.5 # inner product normalization result bounded [0,1]
+	
+	end
+	
+	function (l::KGNN)(fg::AbstractFeaturedGraph)
+	    return l(global_feature(fg), node_feature(fg)')
+	end
 end
 
 # ╔═╡ 48fb7ca7-0acc-4c42-95d4-45f22ecd3817
@@ -204,30 +185,22 @@ end
 # ╔═╡ 3658ade9-e6ec-4445-8ea7-51bf51c77ded
 function hidden_graph_view(model, graph_number)
 	number_hg = length(model.layers[1][:])
-	A_2 = model.layers[1][graph_number].A_2
-	X_2 = model.layers[1][graph_number].X_2
-	num_edge_types = model.layers[1][graph_number].num_edge_types
+	h_adj = model.layers[1][graph_number].h_adj
+	h_nf = model.layers[1][graph_number].h_nf
+	n_ef = model.layers[1][graph_number].n_ef
 	
-	nv = size(A_2)[1]
-		
-	n_edge_types = size(A_2)[3]
+	nv = size(h_adj)[1] # number of vertices
 
-	A_norm_mx = upper_triang(nv)
-		
-	A_2_herm = stack([relu.((A_2[:,:,i].*A_norm_mx)+(A_2[:,:,i].*A_norm_mx)') for i ∈ 1:n_edge_types])
+	adj_reg_mx = Zygote.@ignore upper_triang(nv)|> (isa(h_adj, CuArray) ? gpu : cpu) # upper triangle matrix with diag 0
 
-	id = Matrix{Float32}(I, nv, nv) |> (isa(A_2, CuArray) ? gpu : cpu)  
+	h_adj_r = stack([l.σ.((h_adj[:,:,i].*adj_reg_mx)+(h_adj[:,:,i].*adj_reg_mx)') for i ∈ 1:n_ef]) # make each layer a square matrix, apply activation
 	
-	A_2_adj = stack([sum([A_2_herm[:,:,i] for i ∈ 1:n_edge_types]).+id for i ∈ 1:n_edge_types])
-	
-	A_2_norm = A_2_herm./A_2_adj
-
-	X_2_norm = relu.(X_2)./sum([relu.(X_2)[:,i] for i ∈ 1:num_edge_types])
+	h_nf_r = l.σ.(h_nf)
 
 	graph_feature = [i == graph_number for i ∈ 1:number_hg]
 	res = Chain(model.layers[2:end]...)(graph_feature)
 
-	return A_2_norm, X_2_norm, res
+	return h_adj_r, h_nf_r, res
 end
 
 # ╔═╡ e5b410af-a936-45ad-86e2-5f6799b67690
@@ -340,26 +313,29 @@ function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_g
 		Parallel(vcat, 
 			[KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
 		),device,
-		Dense(n_hidden_graphs => 4, tanh),
-	    Dense(4 => 4, tanh),
+		Dense(n_hidden_graphs => 2, tanh),
+	    #Dense(4 => 4, tanh),
 		#Dropout(0.2),
-		Dense(4 => 2, tanh),
+		#Dense(4 => 2, tanh),
 		softmax,
 	)
 	return model
 end
 
 # ╔═╡ e92f150b-fc55-45c5-b195-a7feb79dc413
-function train_model_batch_dist(class_labels, graph_vector, model, batch_sz, n, lr,)
+function train_model_batch_dist(class_labels, graph_vector, test_classes, test_graphs, model, batch_sz::Int, n::Int, lr::Float64)
 	#good values: n = 900, lr = .1
 
 	n_samples = length(graph_vector)
 	oh_class = Flux.onehotbatch(class_labels, [true, false])
+	test_class = Flux.onehotbatch(test_classes, [true, false])
 	data_class = zip(graph_vector, [oh_class[:,i] for i ∈ 1:n_samples])
 
 	optim = Flux.setup(Flux.Adam(lr/n_samples), model)
 	
 	losses = []
+	test_similarity = []
+	test_accuracy = []
 
 	for epoch in 1:n
 
@@ -385,10 +361,18 @@ function train_model_batch_dist(class_labels, graph_vector, model, batch_sz, n, 
 
 			Flux.update!(optim, model, ∇[1]|>device)
 		end
-
+		preds = model.(test_graphs|>device)|>cpu
+		pred_vector = reduce(hcat,preds)
+		pred_bool = [pred_vector[1,i].==maximum(pred_vector[:,i]) for i ∈ 1:size(pred_vector)[2]]
+		
+		epoch_sim = sum(pred_vector'test_class)/length(pred_bool)
+		epoch_acc = sum(pred_bool.==test_classes)/length(pred_bool)
+		
 		push!(losses, epoch_loss/n_samples)
+		push!(test_accuracy, epoch_acc)
+		push!(test_similarity, epoch_sim)
 	end
-	return losses, model
+	return losses, model, test_accuracy, test_similarity
 end
 
 # ╔═╡ 7132824a-fdfe-4443-ad96-23bd7e188c03
@@ -420,7 +404,7 @@ function train_model_graph_batch(class_labels, graph_vector, model, batch_sz, n,
 			push!(losses, loss)
 			Flux.update!(optim, model, grads[1]|>device)
 		end
-
+        
 	end
 	return losses, model
 end
@@ -456,47 +440,124 @@ begin #Training Data Preparation
 
 end
 
-# ╔═╡ abbee389-8f95-4840-b9ef-a0417a5c576b
-begin
-	shuffled_data = shuffle(collect(zip(btx_featuredgraphs,graph_classes)))
-    training_data = shuffled_data[1:Int(round(0.8*length(btx_featuredgraphs)))]
+# ╔═╡ 198336e0-c2b2-48de-8ec4-9a006719dbba
+function train_kgnn(
+	graph_data::Vector, 
+	class_data::Vector;
+	lr = 0.05,
+	n_epoch = 600::Int,
+	p = 4::Int,
+	n_hg = 8::Int,
+	size_hg = 5::Int,
+	device = gpu,
+	batch_sz = 1,
+	train_portion = 0.7,
+	test_portion = 0.15
+)
+	if length(graph_data)!=length(class_data)
+		error("Graph vector and class vector must be the same size")
+	end
+	
+	class_labels = []
+	meta_graph_vector = Vector{MetaGraphs.MetaGraph{Int64, Float64}}()
+	if typeof(graph_data) == Vector{MolecularGraph.graphmol}
+		for i ∈ eachindex(graph_data)
+			try
+				push!(meta_graph_vector,MetaGraph(graph_data[i]))
+				push!(class_labels,class_data[i])
+			catch e
+				@warn  "Some MolecularGraph objects could not be converted to MetaGraph"
+			end
+		end
+	end
+
+	if typeof(graph_data) == Vector{String}
+		for i ∈ eachindex(graph_data)
+			smiles_string = graph_data[i]
+			try
+				mol = smilestomol(smiles_string)
+				push!(meta_graph_vector,MetaGraph(mol))
+				push!(class_labels,class_data[i])
+			catch e
+				@warn  "Some SMILES could not be converted to MetaGraph"
+			end
+		end
+	end
+
+	if typeof(graph_data) == Vector{MetaGraphs.MetaGraph{Int64, Float64}}
+		meta_graph_vector = graph_data
+		class_labels = class_data
+	end
+
+	if length(meta_graph_vector)==0
+		error("No MetaGraphs could be converted from input graph data")
+	end
+
+	labels = find_labels(meta_graph_vector)
+
+	featured_graphs = mg_to_fg(
+		meta_graph_vector,
+		labels.edge_labels,
+		labels.vertex_labels
+	)
+
+	n_node_types = length(labels.vertex_labels)
+	n_edge_types = length(labels.edge_labels)
+
+	train_set_sz = Int(round(train_portion*length(featured_graphs)))
+	test_set_sz = Int(round(test_portion*length(featured_graphs)))
+
+	shuffled_data = shuffle(collect(zip(featured_graphs,class_labels)))
+	
+	training_data = shuffled_data[1:train_set_sz]
+	
+	testing_data = shuffled_data[train_set_sz+1:train_set_sz+test_set_sz+1]
+	
+	validation_data = shuffled_data[train_set_sz+test_set_sz+1:end]
+	
 	training_graphs = getindex.(training_data,1)
 	training_classes = getindex.(training_data,2)
+
+	testing_graphs = getindex.(testing_data,1)
+	testing_classes = getindex.(testing_data,2)
+
+	losses, trained_model, epoch_test_accuracy, epoch_test_similarity = train_model_batch_dist(
+		training_classes, 
+		training_graphs,
+		testing_classes,
+		testing_graphs,
+		make_kgnn(
+			size_hg,
+			n_node_types,
+			n_edge_types,
+			p,
+			n_hg
+		)|>device,
+		batch_sz,
+		n_epoch,
+		lr
+	)
+
+	data = (;training_data, testing_data, validation_data)
+	
+	return (;losses, trained_model, epoch_test_accuracy, epoch_test_similarity, data)
 end
 
-# ╔═╡ f1b95c7c-a9be-4e87-b53b-1c5698d7c647
+# ╔═╡ 0cb6e4a6-1acc-45ee-b25a-0f5b2c5a02e5
+res = train_kgnn(btx_graphs,graph_classes, lr = 0.1, n_epoch = 600)
+
+# ╔═╡ e3df7446-a75d-4d97-8eef-988910e55753
 begin
-	#@time train_model_batch_dist(training_classes, training_graphs, make_kgnn(8,12,4,4,12)|>device,1,1,.15)
-	btx_losses, btx_model = train_model_batch_dist(training_classes, training_graphs, make_kgnn(6,12,4,4,12)|>device,1,600,.15)
+	plot(res.losses, yaxis="Loss")
+	plot!(twinx(),res.epoch_test_accuracy, yaxis = "accuracy", linecolor = "light green")
+	plot!(twinx(),res.epoch_test_similarity, linecolor = "yellow")
 end
 
-# ╔═╡ 00c53749-30f3-4a78-b18b-38f0ac80afa3
-#plot(btx_losses)
+# ╔═╡ b9a830ee-396d-49eb-833f-685e248734c0
+@save "C:\\Users\\dcase\\RWKLayer\\res.jld2" res
 
-# ╔═╡ d704a940-5c9b-4767-9935-58d649f1bd83
-begin
-	predictions = btx_model.(btx_featuredgraphs|>device)|>cpu
-
-end
-
-# ╔═╡ 08aaa186-3a71-4592-b0e2-89b79a4ecc74
-pred_vector = reduce(hcat,predictions)
-
-# ╔═╡ 1e68fcdd-8853-415c-98dc-0a9b6d1aa36b
-pred_bool = [pred_vector[1,i].==maximum(pred_vector[:,i]) for i ∈ 1:size(pred_vector)[2]]
-
-# ╔═╡ e567fae4-0882-4bfe-81dd-d386a32ba357
-graph_classes
-
-# ╔═╡ 35e95976-383e-4814-a02f-5d4b9169561f
-begin
-    btx_model_cpu = btx_model|>cpu
-    btx_losses_cpu = btx_losses|>cpu
-    plot(btx_losses_cpu)
-	correct_vector = [pred_bool[i].==graph_classes[i] for i ∈ 1:length(graph_classes)]
-	@save "C:\\Users\\dcase\\RWKLayer\\btx_losses_cpu.jld2" btx_losses_cpu
-	@save "C:\\Users\\dcase\\RWKLayer\\btx_model_cpu.jld2" btx_model_cpu
-end
+# ╔═╡ 54e767c0-dcd0-4825-aeb0-456e66cdc538
+CUDA.reclaim()
 
 # ╔═╡ Cell order:
 # ╠═def5bc20-8835-4484-82ca-1cee86d9a34e
@@ -517,11 +578,8 @@ end
 # ╠═7132824a-fdfe-4443-ad96-23bd7e188c03
 # ╠═1a1f354d-a105-410f-b5aa-d4b38ecbacba
 # ╠═98f48ded-4129-47d5-badd-a794f09d42cb
-# ╠═abbee389-8f95-4840-b9ef-a0417a5c576b
-# ╠═f1b95c7c-a9be-4e87-b53b-1c5698d7c647
-# ╠═00c53749-30f3-4a78-b18b-38f0ac80afa3
-# ╠═d704a940-5c9b-4767-9935-58d649f1bd83
-# ╠═08aaa186-3a71-4592-b0e2-89b79a4ecc74
-# ╠═1e68fcdd-8853-415c-98dc-0a9b6d1aa36b
-# ╠═e567fae4-0882-4bfe-81dd-d386a32ba357
-# ╠═35e95976-383e-4814-a02f-5d4b9169561f
+# ╠═198336e0-c2b2-48de-8ec4-9a006719dbba
+# ╠═0cb6e4a6-1acc-45ee-b25a-0f5b2c5a02e5
+# ╠═e3df7446-a75d-4d97-8eef-988910e55753
+# ╠═b9a830ee-396d-49eb-833f-685e248734c0
+# ╠═54e767c0-dcd0-4825-aeb0-456e66cdc538
