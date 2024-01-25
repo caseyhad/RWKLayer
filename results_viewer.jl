@@ -1,5 +1,9 @@
 using JLD2
 
-@load "C:\\Users\\dcase\\RWKLayer\\btx_losses_cpu.jld2" btx_losses_cpu
+@load "C:\\Users\\dcase\\RWKLayer\\res.jld2" res
 
-plot(btx_losses_cpu)
+begin
+	plot(res.losses, yaxis="Loss")
+	plot!(twinx(),res.epoch_test_accuracy, yaxis = "accuracy", linecolor = "light green")
+	plot!(twinx(),res.epoch_test_similarity, linecolor = "yellow")
+end
