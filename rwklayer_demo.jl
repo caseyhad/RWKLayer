@@ -451,8 +451,8 @@ function train_kgnn(
 	size_hg = 5::Int,
 	device = gpu,
 	batch_sz = 1,
-	train_portion = 0.7,
-	test_portion = 0.15
+	train_portion = 0.8,
+	test_portion = 0.2
 )
 	if length(graph_data)!=length(class_data)
 		error("Graph vector and class vector must be the same size")
@@ -511,9 +511,13 @@ function train_kgnn(
 	
 	training_data = shuffled_data[1:train_set_sz]
 	
-	testing_data = shuffled_data[train_set_sz+1:train_set_sz+test_set_sz+1]
+	testing_data = shuffled_data[train_set_sz+1:min(train_set_sz+test_set_sz+1,size(shuffled_data)[1])]
+
+	validation_data = []
 	
-	validation_data = shuffled_data[train_set_sz+test_set_sz+1:end]
+	if train_set_sz+test_set_sz+1 < size(shuffled_data)[1]
+		validation_data = shuffled_data[train_set_sz+test_set_sz+1:end]
+	end
 	
 	training_graphs = getindex.(training_data,1)
 	training_classes = getindex.(training_data,2)
@@ -538,26 +542,69 @@ function train_kgnn(
 		lr
 	)
 
-	data = (;training_data, testing_data, validation_data)
+	output_model = cpu(trained_model)
+
+	data = (;training_data, testing_data, validation_data, labels)
 	
-	return (;losses, trained_model, epoch_test_accuracy, epoch_test_similarity, data)
+	return (;losses, output_model, epoch_test_accuracy, data)
 end
 
 # ╔═╡ 0cb6e4a6-1acc-45ee-b25a-0f5b2c5a02e5
-res = train_kgnn(btx_graphs,graph_classes, lr = 0.1, n_epoch = 600)
+res = train_kgnn(btx_graphs,graph_classes, lr = 1.0, n_epoch = 300)
+
+# ╔═╡ 3033b3a3-8f89-41d8-a8c8-fcedfdcf03ef
+#@load "C:\\Users\\dcase\\RWKLayer\\res.jld2" res
+
+# ╔═╡ e290c142-57de-477f-bd87-f2e9f95f8d2c
+res
 
 # ╔═╡ e3df7446-a75d-4d97-8eef-988910e55753
-begin
-	plot(res.losses, yaxis="Loss")
-	plot!(twinx(),res.epoch_test_accuracy, yaxis = "accuracy", linecolor = "light green")
-	plot!(twinx(),res.epoch_test_similarity, linecolor = "yellow")
-end
+#begin
+	#plot(res.losses, yaxis="Loss")
+	#plot!(twinx(),res.epoch_test_accuracy, yaxis = "accuracy", linecolor = "light green")
+	#plot!(twinx(),res.epoch_test_similarity, linecolor = "yellow")
+#end
 
 # ╔═╡ b9a830ee-396d-49eb-833f-685e248734c0
 @save "C:\\Users\\dcase\\RWKLayer\\res.jld2" res
 
 # ╔═╡ 54e767c0-dcd0-4825-aeb0-456e66cdc538
 CUDA.reclaim()
+
+# ╔═╡ a2d097a3-cc32-491a-9b23-420cef1c57ad
+#function comtribution_map(G::MetaGraph, model; k=4)
+begin
+	investigated_model = res.output_model |> device
+	
+	G = btx_graphs[9]
+
+	vertex_counts = Dict(zip(vertices(G), zeros(length(vertices(G)))))
+	vertex_outcomes = Dict(zip(vertices(G), zeros(length(vertices(G)))))
+	
+	graphlets = MolecularGraphKernels.con_sub_g(4,G)
+	
+	graph_vec = [induced_subgraph(G,graphlet)[1] for graphlet ∈ graphlets]
+	
+	featuredgraph_vec = mg_to_fg(graph_vec,res.data.labels.edge_labels,res.data.labels.vertex_labels)#mg_to_fg(graph_vec,res.data.labels.edge_labels,res.data.labels.vertex_labels)
+	
+	model_outs = [investigated_model(featuredgraph|>device) for featuredgraph ∈ featuredgraph_vec]|>cpu
+
+	for i ∈ eachindex(model_outs)
+		model_prediction = model_outs[i]
+		vertices_present = graphlets[i]
+		for v ∈ vertices_present
+			vertex_counts[v] +=1
+			vertex_outcomes[v] += (model_prediction[1]-model_prediction[2])
+			
+		end
+	end
+	for i ∈ eachindex(vertex_outcomes)
+		vertex_outcomes[i] = vertex_outcomes[i]/vertex_counts[i]
+	end
+end
+
+# ╔═╡ a8696683-be0b-4909-bf97-0fb51514d252
+vertex_outcomes
 
 # ╔═╡ Cell order:
 # ╠═def5bc20-8835-4484-82ca-1cee86d9a34e
@@ -580,6 +627,10 @@ CUDA.reclaim()
 # ╠═98f48ded-4129-47d5-badd-a794f09d42cb
 # ╠═198336e0-c2b2-48de-8ec4-9a006719dbba
 # ╠═0cb6e4a6-1acc-45ee-b25a-0f5b2c5a02e5
+# ╠═3033b3a3-8f89-41d8-a8c8-fcedfdcf03ef
+# ╠═e290c142-57de-477f-bd87-f2e9f95f8d2c
 # ╠═e3df7446-a75d-4d97-8eef-988910e55753
 # ╠═b9a830ee-396d-49eb-833f-685e248734c0
 # ╠═54e767c0-dcd0-4825-aeb0-456e66cdc538
+# ╠═a2d097a3-cc32-491a-9b23-420cef1c57ad
+# ╠═a8696683-be0b-4909-bf97-0fb51514d252
