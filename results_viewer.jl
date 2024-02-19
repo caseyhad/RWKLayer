@@ -36,21 +36,41 @@ begin #Training Data Preparation
 
 end
 
-res = train_kgnn(btx_graphs,graph_classes, lr = 1, n_epoch = 500)
 
-#@save "C:\\Users\\dcase\\RWKLayer\\res.jld2" res
+res = train_kgnn(btx_graphs,graph_classes, lr = 1, n_epoch = 400, n_hg = 12, batch_sz = 24)
 
-begin
-	plot(res.losses, yaxis="Loss")
-	plot!(twinx(),res.epoch_test_accuracy, yaxis = "accuracy", linecolor = "light green")
-	#plot!(twinx(),res.epoch_test_similarity, linecolor = "yellow")
-end
+#@load "C:\\Users\\dcase\\RWKLayer\\res.jld2" res
 
-model = res.output_model |> gpu
 
-RWKLayerFunctions.hidden_graph_view(res.output_model, 1)
+
+#model = res.output_model |> gpu
+
+#RWKLayerFunctions.hidden_graph_view(res.output_model, 1)
 
 column_labels = Dict(zip(1:length(res.data.labels.vertex_labels), res.data.labels.vertex_labels))
 slice_labels = Dict(zip(1:length(res.data.labels.edge_labels), res.data.labels.edge_labels))
 
-g = RWKLayerFunctions.hidden_graph2(res.output_model, 1, column_labels, slice_labels, 0.5, .3)
+begin
+	plot(res.losses, yaxis="Loss")
+	plot!(twinx(),res.epoch_test_accuracy, yaxis = "accuracy", linecolor = "light green")
+	plot!(twinx(),res.epoch_test_recall, linecolor = "yellow")
+end
+
+#g = RWKLayerFunctions.hidden_graph2(res.output_model, 1, column_labels, slice_labels, 0.5, .3)
+
+#testing_graphs = getindex.(res.data.testing_data,1)
+#testing_classes = getindex.(res.data.testing_data,2)
+
+#preds = model.(testing_graphs|>gpu)|>cpu
+#pred_vector = reduce(hcat,preds)
+#pred_bool = [pred_vector[1,i].==maximum(pred_vector[:,i]) for i ∈ 1:size(pred_vector)[2]]
+
+#tp = sum(pred_bool.==testing_classes.==1)
+
+#fp = sum(pred_bool.==testing_classes.+1)
+
+#tn = sum(pred_bool.==testing_classes.==0)
+
+#fn = sum(pred_bool.==testing_classes.-1)
+
+#f1 = 2*tp/(2*tp+fp+fn)

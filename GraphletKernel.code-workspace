@@ -1,0 +1,18 @@
+{
+	"folders": [
+		{
+			"path": "../GraphletKernel"
+		},
+		{
+			"name": "RWKLayer",
+			"path": "."
+		},
+		{
+			"name": "MolecularGraphGenerator.jl",
+			"path": "../MolecularGraphGenerator.jl"
+		}
+	],
+	"settings": {
+		"julia.environmentPath": "c:\\Users\\dcase\\GraphletKernel"
+	}
+}

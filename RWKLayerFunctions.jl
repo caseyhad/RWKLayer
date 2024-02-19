@@ -1,7 +1,7 @@
 
 
 module RWKLayerFunctions
-using MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Plots, GeometricFlux, PlutoUI, JLD2, Graphs, Random, CUDA, Statistics, CSV, DataFrames, MolecularGraph, MolecularGraphKernels, BenchmarkTools, Distributed
+using MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Plots, GeometricFlux, PlutoUI, JLD2, Graphs, Random, CUDA, Statistics, CSV, DataFrames, MolecularGraph, MolecularGraphKernels, BenchmarkTools, Distributed, ProgressMeter
 export KGNN, find_labels, train_kgnn, mg_to_fg, hidden_graph_view
 
 
@@ -198,7 +198,7 @@ function hidden_graph2(
 )
 	h_adj_r, h_nf_r, res = hidden_graph_view(model, graph_number)
 	# get adjacency matrix by edge thresholding
-	adj = sum([h_adj_r[:,:,i].>edge_threshold for i in axes(h_adj_r[1], 3)])
+	adj = sum([h_adj_r[:,:,i].>edge_threshold for i in axes(h_adj_r, 3)])
 
 	v_props = []
 	vertex_deletions = []
@@ -229,7 +229,7 @@ function hidden_graph2(
 		set_prop!(g, e, :label, wts[src(e), dst(e)])
 	end
 	
-	return g
+	return g, A, adj
 end
 
 function hidden_graph(
@@ -309,29 +309,30 @@ function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_g
 		Parallel(vcat, 
 			[KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
 		),device,
-		Dense(n_hidden_graphs => 2, tanh),
-		softmax,
+		#Dense(n_hidden_graphs => n_hidden_graphs, relu),
+		#Dense(n_hidden_graphs => n_hidden_graphs, relu),
+		Dense(n_hidden_graphs => 2, relu),
+		#softmax,
 	)
 	return model
 end
 
-function train_model_batch_dist(class_labels, graph_vector, test_classes, test_graphs, model, batch_sz::Int, n::Int, lr::Float64, device)
+function train_model_batch_dist(class_labels, graph_vector, test_classes, test_graphs, model, batch_sz::Int, n::Int, lr, device)
 	#good values: n = 900, lr = .1
 
 	n_samples = length(graph_vector)
 	oh_class = Flux.onehotbatch(class_labels, [true, false])
-	test_class = Flux.onehotbatch(test_classes, [true, false])
 	data_class = zip(graph_vector, [oh_class[:,i] for i ∈ 1:n_samples])
 
-	optim = Flux.setup(Flux.Adam(lr/n_samples), model)
+	optim = Flux.setup(Flux.RMSProp(lr/n_samples), model)
 	
 	losses = []
-	test_similarity = []
 	test_accuracy = []
+	test_recall = []
 
-	for epoch in 1:n
+	@showprogress for epoch in 1:n
 
-		batches = Base.Iterators.partition(shuffle(collect(data_class)), 3) |> device
+		batches = Base.Iterators.partition(shuffle(collect(data_class)), batch_sz) |> device
 		epoch_loss = 0
 		
 		for batch ∈ batches
@@ -340,7 +341,7 @@ function train_model_batch_dist(class_labels, graph_vector, test_classes, test_g
                 loss, grads = Flux.withgradient(model) do m
     
 			        y_hat = m(x)
-			        Flux.mse(y_hat, y)
+			        Flux.crossentropy(y_hat, y)
 			        
 			    end
 			    return (;loss, grads)
@@ -348,6 +349,8 @@ function train_model_batch_dist(class_labels, graph_vector, test_classes, test_g
 			
 			epoch_loss += sum([results[i].loss for i ∈ eachindex(results)])
 			grads_s = [results[i].grads for i ∈ eachindex(results)]
+
+			#@show results
 			
 			∇ = reduce(add_gradients, grads_s|>cpu)
 
@@ -356,15 +359,19 @@ function train_model_batch_dist(class_labels, graph_vector, test_classes, test_g
 		preds = model.(test_graphs|>device)|>cpu
 		pred_vector = reduce(hcat,preds)
 		pred_bool = [pred_vector[1,i].==maximum(pred_vector[:,i]) for i ∈ 1:size(pred_vector)[2]]
+
+		tp = sum(pred_bool.==test_classes.==1)
+		fp = sum(pred_bool.==test_classes.+1)
 		
-		epoch_sim = sum(pred_vector'test_class)/length(pred_bool)
 		epoch_acc = sum(pred_bool.==test_classes)/length(pred_bool)
-		
+		epoch_rec = tp/(tp+fp)
+
 		push!(losses, epoch_loss/n_samples)
 		push!(test_accuracy, epoch_acc)
-		push!(test_similarity, epoch_sim)
+		push!(test_recall, epoch_rec)
+
 	end
-	return losses, model, test_accuracy, test_similarity
+	return losses, model, test_accuracy, test_recall
 end
 
 function train_model_graph_batch(class_labels, graph_vector, model, batch_sz, n, lr,)
@@ -389,7 +396,7 @@ function train_model_graph_batch(class_labels, graph_vector, model, batch_sz, n,
 			loss, grads = Flux.withgradient(model) do m
 
 				y_hat = m(x)
-				Flux.mse(y_hat, y)
+				Flux.crossentropy(y_hat, y)
 				
 			end
 			push!(losses, loss)
@@ -405,9 +412,9 @@ function train_kgnn(
 	class_data::Vector;
 	lr = 0.05,
 	n_epoch = 600::Int,
-	p = 4::Int,
+	p = 5::Int,
 	n_hg = 8::Int,
-	size_hg = 5::Int,
+	size_hg = 6::Int,
 	device = gpu,
 	batch_sz = 1,
 	train_portion = 0.75,
@@ -484,7 +491,7 @@ function train_kgnn(
 	testing_graphs = getindex.(testing_data,1)
 	testing_classes = getindex.(testing_data,2)
 
-	losses, trained_model, epoch_test_accuracy, epoch_test_similarity = train_model_batch_dist(
+	losses, trained_model, epoch_test_accuracy, epoch_test_recall = train_model_batch_dist(
 		training_classes, 
 		training_graphs,
 		testing_classes,
@@ -507,7 +514,7 @@ function train_kgnn(
 
 	data = (;training_data, testing_data, validation_data, labels)
 	
-	return (;losses, output_model, epoch_test_accuracy, data)
+	return (;losses, output_model, epoch_test_accuracy, epoch_test_recall, data)
 end
 
 end
