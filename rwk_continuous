@@ -141,6 +141,19 @@ rwk_kron(g₁,g₂;l=5)
 # ╔═╡ 3370544e-76fb-4b15-b59a-1cae00d2e514
 MolecularGraphKernels.random_walk(ProductGraph{Direct}(g₁, g₂); l=5)
 
+# ╔═╡ d6df0686-dbe2-4c4f-a795-f90c24c35cb2
+function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
+	mx = zeros(Float32,sz,sz)
+	for i ∈ 1:sz
+		for j ∈ 1:sz
+			if j>i
+				mx[i,j] = 1
+			end
+		end
+	end
+	return mx
+end
+
 # ╔═╡ 2a77361d-4872-4aa2-b63a-2d367bd16ec4
 begin
 	struct KGNN <: AbstractGraphLayer
@@ -242,19 +255,6 @@ begin
 	function (l2::KGNN2)(fg::AbstractFeaturedGraph)
 	    return l2(global_feature(fg), node_feature(fg)')
 	end
-end
-
-# ╔═╡ d6df0686-dbe2-4c4f-a795-f90c24c35cb2
-function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
-	mx = zeros(Float32,sz,sz)
-	for i ∈ 1:sz
-		for j ∈ 1:sz
-			if j>i
-				mx[i,j] = 1
-			end
-		end
-	end
-	return mx
 end
 
 # ╔═╡ 863ae18c-eb5e-45ab-ac0a-6ba0363a5603
@@ -446,7 +446,7 @@ function hidden_graph_view(model, graph_number,number_hg)
 end
 
 # ╔═╡ 72f6259d-3b25-47a5-9166-493ef2967c75
-hidden_graph_view(model_synth, 4,4)
+hidden_graph_view(model_synth, 2,4)
 
 # ╔═╡ 3fd91b06-a9fa-4b68-8b10-41ef539b148d
 begin
@@ -654,17 +654,60 @@ push!(zz[1],"a")
 # ╔═╡ 9a2db8a3-e814-4a5d-9d99-b12eeee684a3
 zz
 
+# ╔═╡ c03e26ef-f56f-4022-9197-e8c4d57c5d2d
+# ╠═╡ disabled = true
+#=╠═╡
+res_losses, res_model = train_model(graph_labels_med[1:20],synthetic_feature_graphs_med[1:20],make_kgnn2(6,3,3,4,5))
+  ╠═╡ =#
+
 # ╔═╡ 2c2be83e-3f59-4288-be2c-7df22c10c298
+# ╠═╡ disabled = true
+#=╠═╡
 train_model_batch(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(5,3,3,4,10))
+  ╠═╡ =#
 
 # ╔═╡ 149a7680-f634-414a-8324-109da1c10e18
+# ╠═╡ disabled = true
+#=╠═╡
 res_losses1, res_model1 = train_model_batch_mt(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn(6,3,3,4,5),45)
+  ╠═╡ =#
+
+# ╔═╡ b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
+#=╠═╡
+plot(res_losses)
+  ╠═╡ =#
 
 # ╔═╡ f2d3cb74-03dd-4e08-b6f0-d3d80730f4e4
+#=╠═╡
 plot(res_losses1)
+  ╠═╡ =#
 
 # ╔═╡ c0472846-94ac-4465-87e2-3ad97bd0ac4c
+#=╠═╡
 plot(res_losses1)
+  ╠═╡ =#
+
+# ╔═╡ d0814d3f-3971-4eff-ab65-e79525d89107
+#=╠═╡
+begin
+	loss1, grads1 = Flux.withgradient(res_model) do m
+				
+		y_hat = m(synthetic_feature_graphs_med[1])
+		Flux.crossentropy(y_hat, [1,0])
+					
+	end
+end
+  ╠═╡ =#
+
+# ╔═╡ 8eae6cbe-b351-4cc2-a6bb-a112e811979e
+#=╠═╡
+a = [grads1,grads1]
+  ╠═╡ =#
+
+# ╔═╡ dee3f7b8-38b6-497f-95c5-bfd424ff8b55
+#=╠═╡
+a_new = reduce(gradient_accumulation!,a)
+  ╠═╡ =#
 
 # ╔═╡ 2db35062-37fe-408b-805e-90ab991152cb
 function gradient_accumulation!(old_grads,new_grads)
@@ -694,16 +737,22 @@ function gradient_accumulation!(old_grads,new_grads)
 end
 
 # ╔═╡ de7c1f09-b8d1-4741-a163-1fcc22f2f017
+#=╠═╡
 hidden_graph_view(res_model1,5,5)
+  ╠═╡ =#
 
 # ╔═╡ b5580104-8a87-4115-91bb-b3d75148aaf9
+#=╠═╡
 test_prediction = [1-(maximum(res_model1(synthetic_feature_graphs_med[i])).==res_model1(synthetic_feature_graphs_med[i])[2]) for i ∈ 90:length(synthetic_feature_graphs_med)]
+  ╠═╡ =#
 
 # ╔═╡ 15d6b88e-75e1-46ae-b6da-995d803e1599
 test = graph_labels_med[90:end]
 
 # ╔═╡ f346c057-5416-44d7-854d-e3da68626222
+#=╠═╡
 mean(test_prediction.==test)
+  ╠═╡ =#
 
 # ╔═╡ 3ef29cb9-1e3d-4bba-8369-9a6cdee87f03
 fg.nf.signal
@@ -750,28 +799,6 @@ function make_kgnn2(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_
 	)
 	return model
 end
-
-# ╔═╡ c03e26ef-f56f-4022-9197-e8c4d57c5d2d
-res_losses, res_model = train_model(graph_labels_med[1:20],synthetic_feature_graphs_med[1:20],make_kgnn2(6,3,3,4,5))
-
-# ╔═╡ b7ffd3e2-d3c9-4817-9d6d-ae636dc9b692
-plot(res_losses)
-
-# ╔═╡ d0814d3f-3971-4eff-ab65-e79525d89107
-begin
-	loss1, grads1 = Flux.withgradient(res_model) do m
-				
-		y_hat = m(synthetic_feature_graphs_med[1])
-		Flux.crossentropy(y_hat, [1,0])
-					
-	end
-end
-
-# ╔═╡ 8eae6cbe-b351-4cc2-a6bb-a112e811979e
-a = [grads1,grads1]
-
-# ╔═╡ dee3f7b8-38b6-497f-95c5-bfd424ff8b55
-a_new = reduce(gradient_accumulation!,a)
 
 # ╔═╡ 6f7ee11d-5913-435d-95d2-5456111e12cb
 function train_model_mt(class_labels,graph_vector,model, batch_sz, update_period, n, lr)
@@ -835,10 +862,15 @@ function train_model_mt(class_labels,graph_vector,model, batch_sz, update_period
 end
 
 # ╔═╡ 30750a6a-1a2b-43a7-9cf2-65b3caa28fdb
+# ╠═╡ disabled = true
+#=╠═╡
 losses_1, model_1 = train_model_mt(graph_labels_med[1:90],synthetic_feature_graphs_med[1:90],make_kgnn2(5,3,3,4,5),1,6,20,.01)
+  ╠═╡ =#
 
 # ╔═╡ 625ca6b3-4b85-42b1-ae7e-2ebc887936b9
+#=╠═╡
 plot(losses_1)
+  ╠═╡ =#
 
 # ╔═╡ f84a13c5-03ad-4479-a248-2f6ebf39680f
 begin

@@ -1,10 +1,8 @@
 
 
 module RWKLayerFunctions
-using MetaGraphs, Flux, Functors, Zygote, LinearAlgebra, Plots, GeometricFlux, PlutoUI, JLD2, Graphs, Random, CUDA, Statistics, CSV, DataFrames, MolecularGraph, MolecularGraphKernels, BenchmarkTools, Distributed, ProgressMeter
+using MetaGraphs, GeometricFlux, Functors, Zygote, ProgressMeter, CSV, DataFrames, CUDA, MolecularGraphKernels, MolecularGraph, Graphs, Flux, Random
 export KGNN, find_labels, train_kgnn, mg_to_fg, hidden_graph_view
-
-
 
 
 function kron2d(A, B)
@@ -72,7 +70,7 @@ struct KGNN <: AbstractGraphLayer
     h_nf # Number of node features
     n_ef  # Number of edge features
     p # Walk length hyperparameter
-    σ # activation function for graph features, sigmoid/relu both work equally
+    a # activation function for graph features, sigmoid/relu both work equally
 end
 
 # Layer constructor with random initializations
@@ -82,7 +80,7 @@ KGNNLayer(num_nodes, num_node_types, num_edge_types, p) = KGNN(
     Float32.(rand(num_nodes,num_node_types)), 
     Int(num_edge_types), 
     Int(p), 
-    σ
+    relu
 )
 
 @functor KGNN
@@ -94,9 +92,9 @@ function (l::KGNN)(A, X)::Float32
 
     adj_reg_mx = Zygote.@ignore upper_triang(nv)|> (isa(l.h_adj, CuArray) ? gpu : cpu) # upper triangle matrix with diag 0
 
-    h_adj_r = stack([(l.σ.(l.h_adj[:,:,i]).*adj_reg_mx)+(l.σ.(l.h_adj[:,:,i]).*adj_reg_mx)' for i ∈ 1:l.n_ef]) # make each layer a square matrix, apply activation
+    h_adj_r = stack([(relu.(l.h_adj[:,:,i]).*adj_reg_mx)+(relu.(l.h_adj[:,:,i]).*adj_reg_mx)' for i ∈ 1:l.n_ef]) # make each layer a square matrix, apply activation
     
-    h_nf_r = l.σ.(l.h_nf)
+    h_nf_r = relu.(l.h_nf)
     
     k_xy = sum((vec(X*h_nf_r')*vec(X*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],A[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # random walk kernel calculation between input and hidden
     
@@ -104,7 +102,7 @@ function (l::KGNN)(A, X)::Float32
         
     k_yy = sum((vec(h_nf_r*h_nf_r')*vec(h_nf_r*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],h_adj_r[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # " hidden and hidden
 
-    return k_xy/(k_xx*k_yy)^.5 # inner product normalization result bounded [0,1]
+    return k_xy/(k_xx*k_yy)^.5 # cosine norm
 
 end
 
@@ -173,7 +171,7 @@ function hidden_graph_view(model, graph_number)
 	h_adj = model.layers[1][graph_number].h_adj
 	h_nf = model.layers[1][graph_number].h_nf
 	n_ef = model.layers[1][graph_number].n_ef
-	σ = model.layers[1][graph_number].σ
+	σ = model.layers[1][graph_number].a
 	
 	nv = size(h_adj)[1] # number of vertices
 
@@ -309,8 +307,8 @@ function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_g
 		Parallel(vcat, 
 			[KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
 		),device,
-		#Dense(n_hidden_graphs => n_hidden_graphs, relu),
-		#Dense(n_hidden_graphs => n_hidden_graphs, relu),
+		Dense(n_hidden_graphs => n_hidden_graphs, relu),
+		Dense(n_hidden_graphs => n_hidden_graphs, relu),
 		Dense(n_hidden_graphs => 2, relu),
 		#softmax,
 	)
@@ -324,7 +322,8 @@ function train_model_batch_dist(class_labels, graph_vector, test_classes, test_g
 	oh_class = Flux.onehotbatch(class_labels, [true, false])
 	data_class = zip(graph_vector, [oh_class[:,i] for i ∈ 1:n_samples])
 
-	optim = Flux.setup(Flux.RMSProp(lr/n_samples), model)
+	#optim = Flux.setup(OptimiserChain(WeightDecay(0.00001),Flux.RMSProp(lr/n_samples)), model)
+	optim = Flux.setup(Flux.Adam(lr), model)
 	
 	losses = []
 	test_accuracy = []
@@ -362,9 +361,10 @@ function train_model_batch_dist(class_labels, graph_vector, test_classes, test_g
 
 		tp = sum(pred_bool.==test_classes.==1)
 		fp = sum(pred_bool.==test_classes.+1)
+		fn = sum(pred_bool.==test_classes.-1)
 		
 		epoch_acc = sum(pred_bool.==test_classes)/length(pred_bool)
-		epoch_rec = tp/(tp+fp)
+		epoch_rec = tp/(tp+fn)
 
 		push!(losses, epoch_loss/n_samples)
 		push!(test_accuracy, epoch_acc)
@@ -513,8 +513,10 @@ function train_kgnn(
 	output_model = cpu(trained_model)
 
 	data = (;training_data, testing_data, validation_data, labels)
+
+	inputs = (lr, batch_sz)
 	
-	return (;losses, output_model, epoch_test_accuracy, epoch_test_recall, data)
+	return (;losses, output_model, epoch_test_accuracy, epoch_test_recall, data, inputs)
 end
 
 end
