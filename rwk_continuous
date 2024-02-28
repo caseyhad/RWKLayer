@@ -141,6 +141,14 @@ rwk_kron(g₁,g₂;l=5)
 # ╔═╡ 3370544e-76fb-4b15-b59a-1cae00d2e514
 MolecularGraphKernels.random_walk(ProductGraph{Direct}(g₁, g₂); l=5)
 
+# ╔═╡ 8b12896e-6742-4e07-aa7f-32f114e32d83
+efs = [2 0 0 1 1 
+	   4 1 0 0 0 
+	   0 0 1 0 0 ]
+
+# ╔═╡ 8c39e230-9691-4167-a9af-33b4f04a0c51
+stack([sum.([relu.(efs)[:,i] for i ∈ 1:size(efs)[2]]) for i in 1:size(efs)[1]])'
+
 # ╔═╡ d6df0686-dbe2-4c4f-a795-f90c24c35cb2
 function upper_triang(sz) # generates an n x n matrix where the upper triangle is 1 and the lower triangle, and main diagonal is 0
 	mx = zeros(Float32,sz,sz)
@@ -906,6 +914,8 @@ end
 # ╠═2f3098ae-a36e-4d90-8241-32fe70259cb6
 # ╠═3370544e-76fb-4b15-b59a-1cae00d2e514
 # ╠═2a77361d-4872-4aa2-b63a-2d367bd16ec4
+# ╠═8b12896e-6742-4e07-aa7f-32f114e32d83
+# ╠═8c39e230-9691-4167-a9af-33b4f04a0c51
 # ╠═7b769c24-0cf3-4dd8-8c4d-2fb339064c09
 # ╠═d6df0686-dbe2-4c4f-a795-f90c24c35cb2
 # ╠═863ae18c-eb5e-45ab-ac0a-6ba0363a5603

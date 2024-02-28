@@ -1,8 +1,8 @@
 
 
 module RWKLayerFunctions
-using MetaGraphs, GeometricFlux, Functors, Zygote, ProgressMeter, CSV, DataFrames, CUDA, MolecularGraphKernels, MolecularGraph, Graphs, Flux, Random
-export KGNN, find_labels, train_kgnn, mg_to_fg, hidden_graph_view
+using MetaGraphs, GeometricFlux, Functors, Zygote, ProgressMeter, CSV, DataFrames, CUDA, MolecularGraphKernels, MolecularGraph, Graphs, Flux, Random, LinearAlgebra
+export KGNN, find_labels, train_kgnn, mg_to_fg, hidden_graph_view, hg_to_mg
 
 
 function kron2d(A, B)
@@ -18,14 +18,19 @@ function split_adjacency(g::MetaGraph,edge_labels)::Array{Float32}
     
     nv = size(g)[1] # number of vertices
     nt = length(edge_labels) # number of edge types  
-    adj_layers = zeros(Float32,nv, nv, nt) # the extra level at the bottom is the non-edges (1-A)
+    adj_layers = zeros(Float32,nv, nv, nt+1) # the extra level at the bottom is the non-edges (1-A)
 
+	adj_layers[:,:, end] .= 1
+	adj_layers[:,:, end] .-= Matrix{Float32}(I, nv, nv)
     # check each edge for a label matching the current slice of the split adjacency matrix
     for l ∈ eachindex(edge_labels)
         for edge ∈ edges(g)
             if get_prop(g, edge, :label) == edge_labels[l]
                 # add the edge to the matrix and delete the non-edge from the last layer
                 adj_layers[src(edge),dst(edge),l] = 1.0
+
+				adj_layers[src(edge),dst(edge),end] = 0
+				adj_layers[dst(edge),src(edge),end] = 0
             end
         end
         # make symmetric
@@ -41,12 +46,18 @@ function split_adjacency(fg::AbstractFeaturedGraph)::Array{Float32}
     ne = size(ef)[2]
     nt = size(ef)[1] # number of edge types
     edge_array = [edge for edge ∈ edges(fg)][1:ne]
-    adj_layers = zeros(Float32, nv, nv, nt)
+    adj_layers = zeros(Float32, nv, nv, nt+1)
+
+	adj_layers[:,:, end] .= 1
+	adj_layers[:,:, end] .-= Matrix{Float32}(I, nv, nv)
     for edge_idx ∈ eachindex(edge_array)
         v₁,v₂ = edge_array[edge_idx][2]
 
         adj_layers[v₁,v₂,1:nt] .= ef[:,edge_idx]
         adj_layers[v₂,v₁,1:nt] .= ef[:,edge_idx]
+
+		adj_layers[v₁,v₂,end] = 0
+        adj_layers[v₂,v₁,end] = 0
     end
     return adj_layers
 end
@@ -76,7 +87,7 @@ end
 # Layer constructor with random initializations
 # Number of edge types does not include de-edges
 KGNNLayer(num_nodes, num_node_types, num_edge_types, p) = KGNN(
-    Float32.(rand(num_nodes, num_nodes, num_edge_types)), 
+    Float32.(rand(num_nodes, num_nodes, num_edge_types+1)), 
     Float32.(rand(num_nodes,num_node_types)), 
     Int(num_edge_types), 
     Int(p), 
@@ -86,23 +97,30 @@ KGNNLayer(num_nodes, num_node_types, num_edge_types, p) = KGNN(
 @functor KGNN
 
 # normalized random walk layer, output ranges from [0,1]
-function (l::KGNN)(A, X)::Float32
+function (l::KGNN)(A, X)#::Float32
 
     nv = size(l.h_adj)[1] # number of vertices
 
     adj_reg_mx = Zygote.@ignore upper_triang(nv)|> (isa(l.h_adj, CuArray) ? gpu : cpu) # upper triangle matrix with diag 0
 
-    h_adj_r = stack([(relu.(l.h_adj[:,:,i]).*adj_reg_mx)+(relu.(l.h_adj[:,:,i]).*adj_reg_mx)' for i ∈ 1:l.n_ef]) # make each layer a square matrix, apply activation
+    h_adj_r_top = stack([(relu.(l.h_adj[:,:,i]).*adj_reg_mx)+(relu.(l.h_adj[:,:,i]).*adj_reg_mx)' for i ∈ 1:size(l.h_adj)[3]]) # make each layer a square matrix, apply activation
+
+	id = Matrix{Float32}(I, nv, nv) |> (isa(l.h_adj, CuArray) ? gpu : cpu)
     
-    h_nf_r = relu.(l.h_nf)
-    
+	h_adj_r_bot = stack([sum([h_adj_r_top[:,:,i] for i ∈ 1:size(l.h_adj)[3]]).+id for i ∈ 1:size(l.h_adj)[3]])
+
+	h_adj_r = h_adj_r_top./h_adj_r_bot
+
+    h_nf_r = σ.(l.h_nf)#./stack([sum.([relu.(l.h_nf)[:,i] for i ∈ 1:size(l.h_nf)[2]]) for i in 1:size(l.h_nf)[1]])'
+
     k_xy = sum((vec(X*h_nf_r')*vec(X*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],A[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # random walk kernel calculation between input and hidden
     
     k_xx = sum((vec(X*X')*vec(X*X')'.*sum([kron2d(A[:,:,i],A[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # " input and input
         
     k_yy = sum((vec(h_nf_r*h_nf_r')*vec(h_nf_r*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],h_adj_r[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # " hidden and hidden
 
-    return k_xy/(k_xx*k_yy)^.5 # cosine norm
+    k_xy/(k_xx*k_yy)^.5 # cosine norm
+	
 
 end
 
@@ -171,15 +189,21 @@ function hidden_graph_view(model, graph_number)
 	h_adj = model.layers[1][graph_number].h_adj
 	h_nf = model.layers[1][graph_number].h_nf
 	n_ef = model.layers[1][graph_number].n_ef
-	σ = model.layers[1][graph_number].a
+	a = model.layers[1][graph_number].a
 	
 	nv = size(h_adj)[1] # number of vertices
 
-	adj_reg_mx = Zygote.@ignore upper_triang(nv)|> (isa(h_adj, CuArray) ? gpu : cpu) # upper triangle matrix with diag 0
+    adj_reg_mx = Zygote.@ignore upper_triang(nv)|> (isa(h_adj, CuArray) ? gpu : cpu) # upper triangle matrix with diag 0
 
-	h_adj_r = stack([(σ.(h_adj[:,:,i]).*adj_reg_mx)+(σ.(h_adj[:,:,i]).*adj_reg_mx)' for i ∈ 1:n_ef]) # make each layer a square matrix, apply activation
-	
-	h_nf_r = σ.(h_nf)
+    h_adj_r_top = stack([(relu.(h_adj[:,:,i]).*adj_reg_mx)+(relu.(h_adj[:,:,i]).*adj_reg_mx)' for i ∈ 1:size(h_adj)[3]]) # make each layer a square matrix, apply activation
+
+	id = Matrix{Float32}(I, nv, nv) |> (isa(h_adj, CuArray) ? gpu : cpu)
+    
+	h_adj_r_bot = stack([sum([h_adj_r_top[:,:,i] for i ∈ 1:size(h_adj)[3]]).+id for i ∈ 1:size(h_adj)[3]])
+
+	h_adj_r = h_adj_r_top./h_adj_r_bot
+
+    h_nf_r = σ.(h_nf)
 
 	graph_feature = [i == graph_number for i ∈ 1:number_hg]
 	res = Chain(model.layers[3:end]...)(graph_feature)
@@ -187,16 +211,20 @@ function hidden_graph_view(model, graph_number)
 	return h_adj_r, h_nf_r, res
 end
 
-function hidden_graph2(
-	model,graph_number,
-	col_to_label::Dict,
-	slice_to_label,
-	edge_threshold::Real,
-	vertex_threshold::Real
+function hg_to_mg(
+	res,graph_number;
+	edge_threshold=.2::Real,
+	vertex_threshold=0::Real,
 )
-	h_adj_r, h_nf_r, res = hidden_graph_view(model, graph_number)
+	model = res.output_model
+
+	col_to_label = Dict(zip(1:length(res.data.labels.vertex_labels), res.data.labels.vertex_labels))
+
+	slice_to_label = Dict(zip(1:length(res.data.labels.edge_labels), res.data.labels.edge_labels))
+	
+	h_adj_r, h_nf_r, class_pred = hidden_graph_view(model, graph_number)
 	# get adjacency matrix by edge thresholding
-	adj = sum([h_adj_r[:,:,i].>edge_threshold for i in axes(h_adj_r, 3)])
+	adj = sum([h_adj_r[:,:,i].>edge_threshold for i in axes(h_adj_r[:,:,1:end-1], 3)])
 
 	v_props = []
 	vertex_deletions = []
@@ -220,43 +248,17 @@ function hidden_graph2(
 
 	# set edge weights
 	wts = reshape(
-		[slice_to_label[x[3]] for x in argmax(h_adj_r; dims=3)], 
+		[slice_to_label[x[3]] for x in argmax(h_adj_r[:,:,1:end-1]; dims=3)], 
+		axes(h_adj_r[:, :, 1])
+	)
+
+	alphas = reshape(
+		[x for x in maximum(h_adj_r[:,:,1:end-1]; dims=3)], 
 		axes(h_adj_r[:, :, 1])
 	)
 	for e in edges(g)
 		set_prop!(g, e, :label, wts[src(e), dst(e)])
-	end
-	
-	return g, A, adj
-end
-
-function hidden_graph(
-	h;
-	col_to_label::Dict=Dict(axes(h[2], 2) .=> axes(h[2], 2)),
-	slice_to_label=["$(Char('`' + i))" for i in axes(h[1], 3)],
-	non_bond_idx::Int=4,
-	edge_threshold::Real=0.5
-)
-	# get adjacency matrix by edge thresholding
-	adj = (h[1][:, :, non_bond_idx] .< edge_threshold) - diagm(ones(axes(h[1], 1)))
-
-	# generate graph topology
-	g = MetaGraph(SimpleGraph(adj))
-
-	# set node features
-	nx = argmax.(eachrow(h[2]))
-	for v in vertices(g)
-		set_prop!(g, v, :label, col_to_label[nx[v]])
-	end
-
-	# set edge weights
-	idx = [i for i in axes(h[1], 3) if i ≠ non_bond_idx]
-	wts = reshape(
-		[slice_to_label[x[3]] for x in argmax(h[1][:, :, 1:3]; dims=3)], 
-		axes(h[1][:, :, 1])
-	)
-	for e in edges(g)
-		set_prop!(g, e, :label, wts[src(e), dst(e)])
+		set_prop!(g, e, :alpha, alphas[src(e), dst(e)])
 	end
 	
 	return g
@@ -310,7 +312,7 @@ function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_g
 		Dense(n_hidden_graphs => n_hidden_graphs, relu),
 		Dense(n_hidden_graphs => n_hidden_graphs, relu),
 		Dense(n_hidden_graphs => 2, relu),
-		#softmax,
+		softmax,
 	)
 	return model
 end
