@@ -103,15 +103,13 @@ function (l::KGNN)(A, X)#::Float32
 
     adj_reg_mx = Zygote.@ignore upper_triang(nv)|> (isa(l.h_adj, CuArray) ? gpu : cpu) # upper triangle matrix with diag 0
 
-    h_adj_r_top = stack([(relu.(l.h_adj[:,:,i]).*adj_reg_mx)+(relu.(l.h_adj[:,:,i]).*adj_reg_mx)' for i ∈ 1:size(l.h_adj)[3]]) # make each layer a square matrix, apply activation
-
 	id = Matrix{Float32}(I, nv, nv) |> (isa(l.h_adj, CuArray) ? gpu : cpu)
+
+    h_adj_sqr = stack([(l.h_adj[:,:,i].*adj_reg_mx)+(l.h_adj[:,:,i].*adj_reg_mx)'.+id for i ∈ 1:size(l.h_adj)[3]]) # make each layer a square matrix by copying its upper triangle to the lower half
     
-	h_adj_r_bot = stack([sum([h_adj_r_top[:,:,i] for i ∈ 1:size(l.h_adj)[3]]).+id for i ∈ 1:size(l.h_adj)[3]])
+	h_adj_r = permutedims(softmax(permutedims(h_adj_sqr ,(3,2,1))),(3,2,1))
 
-	h_adj_r = h_adj_r_top./h_adj_r_bot
-
-    h_nf_r = σ.(l.h_nf)#./stack([sum.([relu.(l.h_nf)[:,i] for i ∈ 1:size(l.h_nf)[2]]) for i in 1:size(l.h_nf)[1]])'
+    h_nf_r = stack(softmax.(eachrow(l.h_nf)))'
 
     k_xy = sum((vec(X*h_nf_r')*vec(X*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],A[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # random walk kernel calculation between input and hidden
     
@@ -195,17 +193,15 @@ function hidden_graph_view(model, graph_number)
 
     adj_reg_mx = Zygote.@ignore upper_triang(nv)|> (isa(h_adj, CuArray) ? gpu : cpu) # upper triangle matrix with diag 0
 
-    h_adj_r_top = stack([(relu.(h_adj[:,:,i]).*adj_reg_mx)+(relu.(h_adj[:,:,i]).*adj_reg_mx)' for i ∈ 1:size(h_adj)[3]]) # make each layer a square matrix, apply activation
-
 	id = Matrix{Float32}(I, nv, nv) |> (isa(h_adj, CuArray) ? gpu : cpu)
+
+    h_adj_sqr = stack([(h_adj[:,:,i].*adj_reg_mx)+(h_adj[:,:,i].*adj_reg_mx)'.+id for i ∈ 1:size(h_adj)[3]]) # make each layer a square matrix by copying its upper triangle to the lower half
     
-	h_adj_r_bot = stack([sum([h_adj_r_top[:,:,i] for i ∈ 1:size(h_adj)[3]]).+id for i ∈ 1:size(h_adj)[3]])
+	h_adj_r = permutedims(softmax(permutedims(h_adj_sqr ,(3,2,1))),(3,2,1))
 
-	h_adj_r = h_adj_r_top./h_adj_r_bot
+    h_nf_r = stack(softmax.(eachrow(h_nf)))'
 
-    h_nf_r = σ.(h_nf)
-
-	graph_feature = [i == graph_number for i ∈ 1:number_hg]
+	graph_feature = Float32.([i == graph_number for i ∈ 1:number_hg])
 	res = Chain(model.layers[3:end]...)(graph_feature)
 
 	return h_adj_r, h_nf_r, res
@@ -309,8 +305,9 @@ function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_g
 		Parallel(vcat, 
 			[KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
 		),device,
-		Dense(n_hidden_graphs => n_hidden_graphs, relu),
-		Dense(n_hidden_graphs => n_hidden_graphs, relu),
+		Dropout(.2),
+		#Dense(n_hidden_graphs => n_hidden_graphs, relu),
+		#Dense(n_hidden_graphs => n_hidden_graphs, relu),
 		Dense(n_hidden_graphs => 2, relu),
 		softmax,
 	)
@@ -351,9 +348,10 @@ function train_model_batch_dist(class_labels, graph_vector, test_classes, test_g
 			epoch_loss += sum([results[i].loss for i ∈ eachindex(results)])
 			grads_s = [results[i].grads for i ∈ eachindex(results)]
 
-			#@show results
+			
 			
 			∇ = reduce(add_gradients, grads_s|>cpu)
+			
 
 			Flux.update!(optim, model, ∇[1]|>device)
 		end
