@@ -1,7 +1,7 @@
 
 
 module RWKLayerFunctions
-using MetaGraphs, GeometricFlux, Functors, Zygote, ProgressMeter, CSV, DataFrames, CUDA, MolecularGraphKernels, MolecularGraph, Graphs, Flux, Random, LinearAlgebra
+using MetaGraphs, GeometricFlux, Functors, Zygote, ProgressMeter, CSV, DataFrames, CUDA, MolecularGraphKernels, MolecularGraph, Graphs, Flux, Random, LinearAlgebra, MLUtils
 export KGNN, find_labels, train_kgnn, mg_to_fg, hidden_graph_view, hg_to_mg
 
 
@@ -105,7 +105,7 @@ function (l::KGNN)(A, X)#::Float32
 
 	id = Matrix{Float32}(I, nv, nv) |> (isa(l.h_adj, CuArray) ? gpu : cpu)
 
-    h_adj_sqr = stack([(l.h_adj[:,:,i].*adj_reg_mx)+(l.h_adj[:,:,i].*adj_reg_mx)'.+id for i ∈ 1:size(l.h_adj)[3]]) # make each layer a square matrix by copying its upper triangle to the lower half
+    h_adj_sqr = stack(map(adj -> adj.*adj_reg_mx + (adj.*adj_reg_mx)'.+id, eachslice(l.h_adj, dims = 3))) # make each layer a square matrix by copying its upper triangle to the lower half
     
 	h_adj_r = permutedims(softmax(permutedims(h_adj_sqr ,(3,2,1))),(3,2,1))
 
@@ -305,13 +305,70 @@ function make_kgnn(graph_size,n_node_types_model,n_edge_types_model,p,n_hidden_g
 		Parallel(vcat, 
 			[KGNNLayer(graph_size,n_node_types_model,n_edge_types_model,p) for i ∈ 1:n_hidden_graphs]...
 		),device,
-		Dropout(.2),
+		#Dropout(.2),
 		#Dense(n_hidden_graphs => n_hidden_graphs, relu),
-		#Dense(n_hidden_graphs => n_hidden_graphs, relu),
-		Dense(n_hidden_graphs => 2, relu),
-		softmax,
+		Dense(n_hidden_graphs => n_hidden_graphs, tanh),
+		Dense(n_hidden_graphs => 2, σ),
+		softmax
 	)
 	return model
+end
+
+function train_from_fmap(class_labels, graph_vector, test_classes, test_graphs, model, batch_sz::Int, n::Int, lr, device)
+
+	n_samples = length(graph_vector)
+	new_model = Chain(model.layers[3:end]...) |> device
+	feature_map = model.layers[1] |> device
+
+	input_mx = stack(feature_map.(graph_vector |> device)) |> cpu
+
+	test_mx = stack(feature_map.(test_graphs |> device)) |> cpu
+
+	oh_class = Flux.onehotbatch(class_labels, [true, false])
+	data_class = Flux.DataLoader((input_mx, oh_class), batchsize=batch_sz, shuffle=true) |> device
+
+	optim = Flux.setup(Flux.Adam(lr), new_model)
+
+	losses = []
+	test_accuracy = []
+	test_recall = []
+
+	for epoch in 1:n
+
+		epoch_loss = 0
+
+		for batch ∈ data_class
+
+			X,Y = batch
+
+			loss, grads = Flux.withgradient(new_model) do m
+
+				Ŷ = m(X)
+				Flux.crossentropy(Ŷ, Y)
+				
+			end
+			
+			Flux.update!(optim, new_model, grads[1]|>device)
+			epoch_loss += loss/batch_sz
+			
+		end
+		preds = new_model.(eachslice(stack(test_mx), dims = 2)|>gpu)|>cpu
+		pred_vector = reduce(hcat,preds)
+		pred_bool = [pred_vector[1,i].==maximum(pred_vector[:,i]) for i ∈ 1:size(pred_vector)[2]]
+
+		tp = sum(pred_bool.==test_classes.==1)
+		fp = sum(pred_bool.==test_classes.+1)
+		fn = sum(pred_bool.==test_classes.-1)
+		
+		epoch_acc = sum(pred_bool.==test_classes)/length(pred_bool)
+		epoch_rec = tp/(tp+fn)
+
+		push!(losses, epoch_loss)
+		push!(test_accuracy, epoch_acc)
+		push!(test_recall, epoch_rec)
+
+	end
+	return losses, new_model, test_accuracy, test_recall
 end
 
 function train_model_batch_dist(class_labels, graph_vector, test_classes, test_graphs, model, batch_sz::Int, n::Int, lr, device)
@@ -321,9 +378,8 @@ function train_model_batch_dist(class_labels, graph_vector, test_classes, test_g
 	oh_class = Flux.onehotbatch(class_labels, [true, false])
 	data_class = zip(graph_vector, [oh_class[:,i] for i ∈ 1:n_samples])
 
-	#optim = Flux.setup(OptimiserChain(WeightDecay(0.00001),Flux.RMSProp(lr/n_samples)), model)
 	optim = Flux.setup(Flux.Adam(lr), model)
-	
+
 	losses = []
 	test_accuracy = []
 	test_recall = []
@@ -338,8 +394,8 @@ function train_model_batch_dist(class_labels, graph_vector, test_classes, test_g
             results = map(batch) do (x,y)
                 loss, grads = Flux.withgradient(model) do m
     
-			        y_hat = m(x)
-			        Flux.crossentropy(y_hat, y)
+			        ŷ = m(x)
+			        Flux.crossentropy(ŷ, y)
 			        
 			    end
 			    return (;loss, grads)
@@ -417,8 +473,8 @@ function train_kgnn(
 	size_hg = 6::Int,
 	device = gpu,
 	batch_sz = 1,
-	train_portion = 0.75,
-	test_portion = 0.25
+	train_portion = 0.80,
+	two_stage = false
 )
 	if length(graph_data)!=length(class_data)
 		error("Graph vector and class vector must be the same size")
@@ -471,19 +527,13 @@ function train_kgnn(
 	n_edge_types = length(labels.edge_labels)
 
 	train_set_sz = Int(round(train_portion*length(featured_graphs)))
-	test_set_sz = Int(round(test_portion*length(featured_graphs)))
+	test_set_sz = length(featured_graphs)-train_set_sz
 
 	shuffled_data = shuffle(collect(zip(featured_graphs,class_labels)))
 	
 	training_data = shuffled_data[1:train_set_sz]
 	
 	testing_data = shuffled_data[train_set_sz+1:min(train_set_sz+test_set_sz+1,size(shuffled_data)[1])]
-
-	validation_data = []
-	
-	if train_set_sz+test_set_sz+1 < size(shuffled_data)[1]
-		validation_data = shuffled_data[train_set_sz+test_set_sz+1:end]
-	end
 	
 	training_graphs = getindex.(training_data,1)
 	training_classes = getindex.(training_data,2)
@@ -491,32 +541,87 @@ function train_kgnn(
 	testing_graphs = getindex.(testing_data,1)
 	testing_classes = getindex.(testing_data,2)
 
-	losses, trained_model, epoch_test_accuracy, epoch_test_recall = train_model_batch_dist(
-		training_classes, 
-		training_graphs,
-		testing_classes,
-		testing_graphs,
-		make_kgnn(
+	if two_stage
+		model1 = make_kgnn(
 			size_hg,
 			n_node_types,
 			n_edge_types,
 			p,
 			n_hg,
 			device
-		)|>device,
-		batch_sz,
-		n_epoch,
-		lr,
-		device
-	)
+			)|>device
 
-	output_model = cpu(trained_model)
 
-	data = (;training_data, testing_data, validation_data, labels)
+		losses_fm, trained_model_fm, epoch_test_accuracy_fm, epoch_test_recall_fm = train_model_batch_dist(
+			training_classes, 
+			training_graphs,
+			testing_classes,
+			testing_graphs,
+			model1,
+			batch_sz,
+			n_epoch,
+			lr,
+			device
+		)
 
-	inputs = (lr, batch_sz)
-	
-	return (;losses, output_model, epoch_test_accuracy, epoch_test_recall, data, inputs)
+
+
+		losses_nm, new_classifier, test_accuracy_nm, test_recall_nm = train_from_fmap(
+			training_classes, 
+			training_graphs,
+			testing_classes,
+			testing_graphs,
+			trained_model_fm, 
+			32, 
+			n_epoch, 
+			lr, 
+			device)
+
+		losses = vcat(losses_fm, losses_nm)
+
+		epoch_test_accuracy = vcat(epoch_test_accuracy_fm, test_accuracy_nm)
+
+		epoch_test_recall = vcat(epoch_test_recall_fm, test_recall_nm)
+
+		output_model = cpu(Chain(trained_model_fm.layers[1:2]...,new_classifier.layers...))
+
+		data = (;training_data, testing_data, labels)
+
+		inputs = (lr, batch_sz)
+		
+		return (;losses, output_model, epoch_test_accuracy, epoch_test_recall, data, inputs)
+
+	else
+		model1 = make_kgnn(
+			size_hg,
+			n_node_types,
+			n_edge_types,
+			p,
+			n_hg,
+			device
+			)|>device
+
+
+		losses, trained_model, epoch_test_accuracy, epoch_test_recall = train_model_batch_dist(
+			training_classes, 
+			training_graphs,
+			testing_classes,
+			testing_graphs,
+			model1,
+			batch_sz,
+			n_epoch,
+			lr,
+			device
+		)
+
+		output_model = cpu(trained_model)
+
+		data = (;training_data, testing_data, labels)
+
+		inputs = (lr, batch_sz)
+		
+		return (;losses, output_model, epoch_test_accuracy, epoch_test_recall, data, inputs)
+	end
 end
 
 end
