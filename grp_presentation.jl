@@ -18,11 +18,14 @@ end
 begin
 	import Pkg
 	Pkg.activate(".");
-	using MetaGraphs, CSV, DataFrames,MolecularGraph, JLD2, MolecularGraphKernels, GeometricFlux, Flux, CUDA, RWKLayerFunctions, Graphs, Plots, PlutoUI, LinearAlgebra, MLUtils
+	using MetaGraphs, CSV, DataFrames,MolecularGraph, JLD2, GeometricFlux, Flux, CUDA, RWKLayerFunctions, Graphs, Plots, PlutoUI, LinearAlgebra, MLUtils, Colors
 end
 
 # ╔═╡ 1ea5cf04-f5e2-488e-882a-18554a3f632f
 using Markdown
+
+# ╔═╡ 92842f58-4f48-4f1d-912d-06f65036652b
+using MolecularGraphKernels
 
 # ╔═╡ 98d0be39-5f65-4a7b-82fd-d99d3869b926
 TableOfContents()
@@ -35,6 +38,9 @@ md"# **Random Walk Layer**"
 
 # ╔═╡ 184acc05-69c2-4828-b452-f963d5391e13
 Main.RWKLayerFunctions = RWKLayerFunctions
+
+# ╔═╡ 9562ec4e-e8b6-4a7d-bf1d-bb6d00f26354
+md"### Background"
 
 # ╔═╡ 322e22d3-ac2d-4ea1-b043-5bb9ffc0fc84
 md"
@@ -69,9 +75,17 @@ While there are faster algorithms to construct the direct product graph for two 
 
 This enables us to use a graph reperesentation within a neural network, using gradient descent to _learn_ continuous graphs that make for insightful kernel comparisons with the input data.
 
-[here](https://proceedings.neurips.cc/paper/2020/file/ba95d78a7c942571185308775a97a3a0-Paper.pdf) is an example of a proposed network design using this algorithm"
+[here](https://proceedings.neurips.cc/paper/2020/file/ba95d78a7c942571185308775a97a3a0-Paper.pdf) is an example of a proposed network design using this algorithm
+
+![](https://raw.githubusercontent.com/caseyhad/RWKLayer/main/RWKlayer.png)
+
+Nicholentzos, Vazirgiannis, 2020, NeurIPS
+"
 
 
+
+# ╔═╡ f847b0b5-9e69-42f9-af18-ae6446c8251e
+md"### Molecular graph demonstration"
 
 # ╔═╡ 5990adbd-d3b8-4c03-9f3e-4bfe2b86e1ab
 begin # Demonstration that the Kronecker based approach and MGK have the same answer for K(x,y) between two molecular graphs
@@ -115,11 +129,19 @@ function rwk_kron(g₁::MetaGraph,g₂::MetaGraph;l=1)
 	
 end
 
+# ╔═╡ 426d9a36-c16f-4287-8511-7fd303625718
+md"
+here we can see that the result is the same as the discrete implementation in MolecularGraphKernels, however the result is a float
+"
+
 # ╔═╡ bcfbc20c-4587-4efa-8173-f032ac9e609a
 rwk_kron(g₁,g₂;l=5)
 
 # ╔═╡ dc5e40f8-bd39-4769-a524-32144b4fc230
 MolecularGraphKernels.random_walk(ProductGraph{Direct}(g₁, g₂); l=5)
+
+# ╔═╡ 1d6af92f-e334-4c48-aa8a-89dac22db854
+md"### Isomorphism Learning with size 4 graph"
 
 # ╔═╡ 49b0c3b8-3b9b-47c0-b640-a0c378b1699b
 begin # preparing a small size 4 FeaturedGraph for testing the KGNN layer
@@ -145,13 +167,25 @@ begin # preparing a small size 4 FeaturedGraph for testing the KGNN layer
 
 end
 
+# ╔═╡ a9655c63-8039-4198-8465-7c80475d93b9
+@bind epoch Slider(1:60)
+
 # ╔═╡ 62bd0181-6e87-457e-b8ef-cbd2403cdb58
-html"""
-<div><iframe src="https://drive.google.com/file/d/1YnV8Kt5o8CDm3lA5sDfO4ilslZDLNNto/preview" width="640" height="480" allow="autoplay"></iframe></div>
+md"""
+Here is what this graph looks like:
+![](https://raw.githubusercontent.com/caseyhad/RWKLayer/main/iso_graphs.PNG)
 """
 
-# ╔═╡ a9655c63-8039-4198-8465-7c80475d93b9
-@bind epoch Slider(1:2:300)
+# ╔═╡ 7ff3bb22-a933-4c8e-9a8b-d898d7eb5fd0
+md"
+**Some important notes about the visualization on continuous graphs:**
+
+Edge and node feature vectors always sum to 1
+
+to visualize the graph, the displayed edge/node features are the ones with the largest value in the respective feature vectors
+
+Edges have an alpha mask applied that is the value of the largest edge feature. If the value of the largest edge feature (that is not the non-bond feature) is smaller than a cutoff value (0.2), the edge is not displayed for visual clarity. 
+"
 
 # ╔═╡ 2b42e1ae-4b73-4ee4-8318-690ebf0d11fa
 function graph_isomorphism_viz(model)
@@ -174,8 +208,6 @@ function graph_isomorphism_viz(model)
 	col_to_label = Dict(zip(1:3, 7:9))
 
 	slice_to_label = Dict(zip(1:3, 1:3))
-	
-	X_2_norm = relu.(mcpu.h_nf)
 	
 	# get adjacency matrix by edge thresholding
 	A = sum([h_adj_r[:,:,i].>0 for i in axes(h_adj_r[:,:,1:end-1], 3)])
@@ -217,11 +249,11 @@ end
 begin # isomorphism learning test with one size 4 hidden graph, loss is 1-kernel score
 	A_2 = Float32.(rand(4,4, 4))
 	model = RWKLayerFunctions.KGNN(A_2, Float32.(rand(4,3)), 3, 4, relu) |> device
-	optim = Flux.setup(Flux.Momentum(1, 0.5), model)
+	optim = Flux.setup(Flux.Descent(10), model)
 	losses = []
 	loss = []
 	graph_evolution = []
-	for epoch in 1:300
+	for epoch in 1:60
 		loss, grads = Flux.withgradient(model) do m
 			ker_norm = m(fg)
 			1-ker_norm # loss function
@@ -241,6 +273,8 @@ begin
 	ylabel!("Kernel Score (Cosine Norm)")
 	xlabel!("Epoch")
 	plot!([epoch], seriestype="vline")
+	ylims!(0, 1)
+	xlims!(0, 60)
 end
 
 # ╔═╡ e6f246ab-7d58-4f4e-9e54-134f3d9ea80e
@@ -249,6 +283,9 @@ begin
 	viz_graph(mg, edge_alpha_mask=edge_alpha, layout_style = :circular)
 end
 
+# ╔═╡ 4920a4c7-f63a-4053-94c6-7b342037128b
+md"### Easy synthetic classification task"
+
 # ╔═╡ fd87e5c5-2022-4d06-a9c5-955306eaac2d
 begin # load synthetic test set #1
 	synthetic_data = load(string(pwd(),"\\molecules.jld2"))
@@ -256,11 +293,11 @@ begin # load synthetic test set #1
 	synthetic_classes = synthetic_data["class_enc"]
 end
 
-# ╔═╡ 4a8339bc-18b0-46c5-8144-5a2c9a807897
-viz_graph(synthetic_graph_data[15])
-
 # ╔═╡ 4d526687-d354-4176-bbe3-20bcf27f2598
 viz_graph(synthetic_graph_data[5])
+
+# ╔═╡ 4a8339bc-18b0-46c5-8144-5a2c9a807897
+viz_graph(synthetic_graph_data[15])
 
 # ╔═╡ 48b61aea-6a25-4143-b1be-04b839d43929
 viz_graph(ProductGraph{Direct}(synthetic_graph_data[15], synthetic_graph_data[5]),layout_style = :circular)
@@ -314,51 +351,8 @@ begin
 	viz_graph(hg4, edge_alpha_mask=edge_alpha_hg4)
 end
 
-# ╔═╡ c40bcbd8-85b6-4f00-b43d-c0db20c003ec
-G = synthetic_graph_data[27]
-
-# ╔═╡ b153936e-e321-454a-95cd-5c5145bcb287
-begin
-	investigated_model = res.output_model |> device
-
-	vertex_counts = Dict(zip(vertices(G), zeros(length(vertices(G)))))
-	vertex_outcomes = Dict(zip(vertices(G), zeros(length(vertices(G)))))
-	
-	graphlets = MolecularGraphKernels.con_sub_g(3,G)
-	
-	graph_vec = [induced_subgraph(G,graphlet)[1] for graphlet ∈ graphlets]
-	
-	featuredgraph_vec = mg_to_fg(graph_vec,res.data.labels.edge_labels,res.data.labels.vertex_labels)
-	
-	model_outs = [investigated_model(featuredgraph|>device) for featuredgraph ∈ featuredgraph_vec]|>cpu
-
-	for i ∈ eachindex(model_outs)
-		model_prediction = model_outs[i]
-		vertices_present = graphlets[i]
-		for v ∈ vertices_present
-			vertex_counts[v] +=1
-			vertex_outcomes[v] += (model_prediction[1]-model_prediction[2])
-			
-		end
-	end
-	for i ∈ eachindex(vertex_outcomes)
-		vertex_outcomes[i] = vertex_outcomes[i]/vertex_counts[i]
-	end
-end
-
-# ╔═╡ 8499e57e-8e1f-4c76-9650-11c784309569
-viz_graph(G)
-
-# ╔═╡ 192db9bf-e3b5-4788-a8bb-325b14ac3165
-for v in vertices(G)
-	set_prop!(G, v, :alpha, vertex_outcomes[v])
-end
-
-# ╔═╡ 8c8f77aa-2394-4abf-93e1-856432b93112
-begin
-	edge_alpha_G = [(vertex_outcomes[i]+1)/2 for i in vertices(G)]
-	viz_graph(G, node_alpha_mask=edge_alpha_G)
-end
+# ╔═╡ 34e8176d-7b83-46e3-b017-2f726fd3b37f
+md"### Honey bee toxicity classicication"
 
 # ╔═╡ 8205224c-1250-4c9c-b361-a15c2dc17fbf
 begin #Training Data Preparation
@@ -391,13 +385,19 @@ begin #Training Data Preparation
 end
 
 # ╔═╡ a1257336-376b-451e-b0df-55cc34e78d59
-@bind bee_tox_i Slider(1:length(btx_graphs))
+@bind bee_tox_i Slider(1:length(btx_mg_bal))
 
 # ╔═╡ d6e4116a-96e4-41e5-a1fc-814089de711f
 begin
 	g_btx = btx_mg_bal[bee_tox_i]
 	viz_graph(g_btx, layout_style = :molecular)
 end
+
+# ╔═╡ 55b299a5-af23-4013-b657-b47a835b631f
+bz = [[1],[2],[3],[4]] |> gpu
+
+# ╔═╡ 4b50a52f-477d-4dcb-b3ea-7c50b41786f8
+vcat(bz...)
 
 # ╔═╡ dcbd4f11-5bf8-4e2e-87e8-8a451020ba20
 md"Is this molecule toxic to honeybees? T/F"
@@ -411,35 +411,11 @@ md"Does the trained model think that it is toxic? T/F"
 # ╔═╡ 159eb39c-5556-4e67-b69c-1b1647a9581c
 md"Here is the output of the model for this graph:"
 
+# ╔═╡ 35207930-ff61-4bd0-9b38-fae3471c1c16
+md"### Contribution Map"
+
 # ╔═╡ 5768dafb-c551-4e42-bb06-f17ff696aaac
 @load pwd()*"\\results\\opwVkHiDwd.jld2" res_med
-
-# ╔═╡ b6008ccc-4b4e-4489-9433-4f8ce7afd6b0
-res_med.output_model.layers[1][1]
-
-# ╔═╡ 3bce473a-d03a-45d5-b8b7-ee0203480c12
-m_btx = res_med.output_model|>gpu
-
-# ╔═╡ 3016723e-36b4-4142-a8dd-97bff4cf8196
-begin
-	preds = m_btx.(btx_featuredgraphs|>gpu)|>cpu
-	pred_vector = reduce(hcat,preds)
-	pred_bool = [pred_vector[1,i].==maximum(pred_vector[:,i]) for i ∈ 1:size(pred_vector)[2]]
-end
-
-# ╔═╡ acfc2998-db0a-4b19-b25e-1ba5e4cac06e
-pred_bool[bee_tox_i]
-
-# ╔═╡ cc0d64df-5e78-4332-99eb-f753af91fa88
-preds[bee_tox_i]
-
-# ╔═╡ e793dba6-92fe-4b7d-9ae4-3aafbe259f32
-begin
-	test_data = res_med.data.testing_data
-	true_classes = [example[2] for example in test_data]
-	pred_classes = [(m_btx(example[1]|>gpu)|>cpu) for example in test_data]
-	pred_classes_bool = [i[1]==maximum(i) for i in pred_classes]
-end
 
 # ╔═╡ 2a846906-b2bf-4d65-878a-b5f5db263194
 begin
@@ -454,8 +430,35 @@ begin
 	
 end
 
+# ╔═╡ 3016723e-36b4-4142-a8dd-97bff4cf8196
+begin
+	m_btx = res_med.output_model|>gpu
+	preds = m_btx.(btx_featuredgraphs|>gpu)|>cpu
+	pred_vector = reduce(hcat,preds)
+	pred_bool = [pred_vector[1,i].==maximum(pred_vector[:,i]) for i ∈ 1:size(pred_vector)[2]]
+end;
+
+# ╔═╡ acfc2998-db0a-4b19-b25e-1ba5e4cac06e
+pred_bool[bee_tox_i]
+
+# ╔═╡ cc0d64df-5e78-4332-99eb-f753af91fa88
+preds[bee_tox_i]
+
+# ╔═╡ e793dba6-92fe-4b7d-9ae4-3aafbe259f32
+begin
+	test_data = res_med.data.testing_data
+	true_classes = [example[2] for example in test_data]
+	pred_classes = [(m_btx(example[1]|>gpu)|>cpu) for example in test_data]
+	pred_classes_bool = [i[1]==maximum(i) for i in pred_classes]
+end;
+
 # ╔═╡ fc4ec6e7-35dd-4afb-8541-f061934d7897
 @bind hg_med Slider(1:6)
+
+# ╔═╡ 501e35cc-c623-4f55-8db8-5f47bd8021bd
+md"
+The Model recognized Thiophosphates/organothiophosphates as toxic
+"
 
 # ╔═╡ 10b58953-1625-4a13-a810-65db70e97a1a
 RWKLayerFunctions.hidden_graph_view(res_med.output_model,hg_med)[3]
@@ -468,41 +471,60 @@ begin
 end
 
 # ╔═╡ 3d5c39cb-9516-49a1-9591-ade3b8d5157b
-function gk_contribution_map(res,G)
+function gk_contribution_map(res,G::MetaGraph;dynamic_range = 1::Real)
+	#store the trained model on device being used (gpu or cpu)
 	investigated_model = res.output_model |> device
 
+	#initialize a dict for the appearence counts of the node in graphlets
 	vertex_counts = Dict(zip(vertices(G), zeros(length(vertices(G)))))
+	#initialize a dict for the accumulated probability of the graphlets (that contain v) of being positive class
 	vertex_outcomes = Dict(zip(vertices(G), zeros(length(vertices(G)))))
-	
+
+	#generate each all-connected size-k subgraphs of G
 	graphlets = MolecularGraphKernels.con_sub_g(res.output_model.layers[1][1].p,G)
-	
+
+	#make a vector of graphlets as metagraphs
 	graph_vec = [induced_subgraph(G,graphlet)[1] for graphlet ∈ graphlets]
-	
+
+	#convert to featuredGraphs
 	featuredgraph_vec = mg_to_fg(graph_vec,res.data.labels.edge_labels,res.data.labels.vertex_labels)
-	
+
+	#pass graphlets through the model
 	model_outs = [investigated_model(featuredgraph|>device) for featuredgraph ∈ featuredgraph_vec]|>cpu
 
 	for i ∈ eachindex(model_outs)
 		model_prediction = model_outs[i]
+		#list of vertices in current graphlet
 		vertices_present = graphlets[i]
 		for v ∈ vertices_present
 			vertex_counts[v] +=1
+			#add the prob. of positive class, subract the prob. of the negative class
 			vertex_outcomes[v] += (model_prediction[1]-model_prediction[2])
 			
 		end
 	end
 	for i ∈ eachindex(vertex_outcomes)
-		vertex_outcomes[i] = vertex_outcomes[i]/vertex_counts[i]
+		vertex_outcomes[i] = vertex_outcomes[i]/(vertex_counts[i]*dynamic_range)
 	end
 	return vertex_outcomes
 end
 
-# ╔═╡ 92dd4d01-58c5-4217-b171-344763af3344
+# ╔═╡ d5e6725b-046e-4a50-974e-d138dc4b7e52
 begin
-	vertex_contributions = gk_contribution_map(res_med,g_btx)
-	btx_alpha_mask = -[(((vertex_contributions[i])/(softmax([1,0])[1]))+1)/2 for i in 1:length(vertex_contributions)].+1
-	viz_graph(g_btx, node_alpha_mask=btx_alpha_mask, layout_style =:molecular)
+	function viz_node_colors(weights)::Vector{RGBA}
+	wts_vec = -[((weights[i])+1)/2 for i in 1:length(weights)].+1
+		#wts_vec = -[(((weights[i])/(softmax([1,0])[1]))+1)/2 for i in 1:length(weights)].+1
+    return [RGBA(1-i, 0, i) for i in wts_vec]
+	
+	end
+	function viz_node_colors(g::MetaGraph)
+    	return viz_node_colors(gk_contribution_map(res_med, g, dynamic_range = .462))
+	end
+	
 end
+
+# ╔═╡ efdd662f-6347-4804-98d6-566b086a9911
+viz_graph(g_btx, layout_style = :molecular; viz_node_colors)
 
 # ╔═╡ 59332fe2-25c3-46b1-a8a6-4c0ccfe2bdc2
 function model_scores(preds, truths)
@@ -529,32 +551,39 @@ end
 model_scores(pred_classes_bool, true_classes)
 
 # ╔═╡ Cell order:
-# ╠═1ea5cf04-f5e2-488e-882a-18554a3f632f
-# ╠═31cf1fe0-d5a2-11ee-0215-07266138b2b6
-# ╠═98d0be39-5f65-4a7b-82fd-d99d3869b926
-# ╠═59989cc7-7e6f-4330-a926-4cad0a908115
-# ╟─0045ba50-90e4-4903-8621-26325bed6c5d
+# ╟─1ea5cf04-f5e2-488e-882a-18554a3f632f
+# ╟─31cf1fe0-d5a2-11ee-0215-07266138b2b6
+# ╟─92842f58-4f48-4f1d-912d-06f65036652b
+# ╟─98d0be39-5f65-4a7b-82fd-d99d3869b926
+# ╟─59989cc7-7e6f-4330-a926-4cad0a908115
+# ╠═0045ba50-90e4-4903-8621-26325bed6c5d
 # ╠═184acc05-69c2-4828-b452-f963d5391e13
+# ╠═9562ec4e-e8b6-4a7d-bf1d-bb6d00f26354
 # ╟─322e22d3-ac2d-4ea1-b043-5bb9ffc0fc84
 # ╟─507043b5-5162-4608-b5a1-65e2cb0f2b3c
-# ╠═4a8339bc-18b0-46c5-8144-5a2c9a807897
 # ╟─1eb98b42-f8cc-4717-b725-e6dfba1d9928
-# ╠═4d526687-d354-4176-bbe3-20bcf27f2598
+# ╟─4d526687-d354-4176-bbe3-20bcf27f2598
+# ╟─4a8339bc-18b0-46c5-8144-5a2c9a807897
 # ╟─9a935611-1efb-48f9-aa18-c8453430d09d
-# ╠═48b61aea-6a25-4143-b1be-04b839d43929
+# ╟─48b61aea-6a25-4143-b1be-04b839d43929
 # ╟─66f23fa4-3eaf-43e9-930d-99e8e928d74f
+# ╟─f847b0b5-9e69-42f9-af18-ae6446c8251e
 # ╠═5990adbd-d3b8-4c03-9f3e-4bfe2b86e1ab
 # ╠═5e6915a9-6c0a-4f0c-bd90-d397b9e5ad12
+# ╟─426d9a36-c16f-4287-8511-7fd303625718
 # ╠═bcfbc20c-4587-4efa-8173-f032ac9e609a
 # ╠═dc5e40f8-bd39-4769-a524-32144b4fc230
+# ╟─1d6af92f-e334-4c48-aa8a-89dac22db854
 # ╠═49b0c3b8-3b9b-47c0-b640-a0c378b1699b
-# ╟─62bd0181-6e87-457e-b8ef-cbd2403cdb58
-# ╠═dc37ad80-9e1a-488e-9f9d-6a92e7166d90
+# ╟─dc37ad80-9e1a-488e-9f9d-6a92e7166d90
 # ╠═74327d26-b4ae-4582-a1b6-2797ed1a0360
-# ╠═a9655c63-8039-4198-8465-7c80475d93b9
 # ╠═b5d13c10-e841-459c-b189-9e6317f8acaf
-# ╠═e6f246ab-7d58-4f4e-9e54-134f3d9ea80e
-# ╠═2b42e1ae-4b73-4ee4-8318-690ebf0d11fa
+# ╠═a9655c63-8039-4198-8465-7c80475d93b9
+# ╟─62bd0181-6e87-457e-b8ef-cbd2403cdb58
+# ╟─e6f246ab-7d58-4f4e-9e54-134f3d9ea80e
+# ╟─7ff3bb22-a933-4c8e-9a8b-d898d7eb5fd0
+# ╟─2b42e1ae-4b73-4ee4-8318-690ebf0d11fa
+# ╟─4920a4c7-f63a-4053-94c6-7b342037128b
 # ╠═fd87e5c5-2022-4d06-a9c5-955306eaac2d
 # ╠═e50bc67b-4a7c-4084-80e6-d177f15ff967
 # ╠═f732df66-75d5-49b7-82d6-54c0f193c369
@@ -565,30 +594,29 @@ model_scores(pred_classes_bool, true_classes)
 # ╠═24e4f3dd-5399-411a-bdcb-f17d6fff4947
 # ╠═58a65a8d-24f9-42e9-8794-b53144d4cae4
 # ╠═93e2dedd-e8a0-443e-b691-326a749ebf32
-# ╠═b153936e-e321-454a-95cd-5c5145bcb287
-# ╠═c40bcbd8-85b6-4f00-b43d-c0db20c003ec
-# ╠═8499e57e-8e1f-4c76-9650-11c784309569
-# ╠═192db9bf-e3b5-4788-a8bb-325b14ac3165
-# ╠═8c8f77aa-2394-4abf-93e1-856432b93112
+# ╟─34e8176d-7b83-46e3-b017-2f726fd3b37f
 # ╠═8205224c-1250-4c9c-b361-a15c2dc17fbf
+# ╟─c1aac3ef-4ef8-4490-9418-50bfb48aa7d4
+# ╟─2a846906-b2bf-4d65-878a-b5f5db263194
 # ╠═a1257336-376b-451e-b0df-55cc34e78d59
 # ╠═d6e4116a-96e4-41e5-a1fc-814089de711f
+# ╠═55b299a5-af23-4013-b657-b47a835b631f
+# ╠═4b50a52f-477d-4dcb-b3ea-7c50b41786f8
 # ╟─dcbd4f11-5bf8-4e2e-87e8-8a451020ba20
 # ╟─6e808961-0cb5-4843-a893-b9743d1da383
 # ╟─8efec125-9d67-4492-966f-85aed4317d62
 # ╟─acfc2998-db0a-4b19-b25e-1ba5e4cac06e
 # ╟─159eb39c-5556-4e67-b69c-1b1647a9581c
 # ╟─cc0d64df-5e78-4332-99eb-f753af91fa88
-# ╠═92dd4d01-58c5-4217-b171-344763af3344
+# ╟─35207930-ff61-4bd0-9b38-fae3471c1c16
+# ╟─efdd662f-6347-4804-98d6-566b086a9911
 # ╠═5768dafb-c551-4e42-bb06-f17ff696aaac
-# ╠═b6008ccc-4b4e-4489-9433-4f8ce7afd6b0
-# ╠═3bce473a-d03a-45d5-b8b7-ee0203480c12
 # ╠═3016723e-36b4-4142-a8dd-97bff4cf8196
 # ╠═e793dba6-92fe-4b7d-9ae4-3aafbe259f32
-# ╟─c1aac3ef-4ef8-4490-9418-50bfb48aa7d4
-# ╠═2a846906-b2bf-4d65-878a-b5f5db263194
-# ╠═fc4ec6e7-35dd-4afb-8541-f061934d7897
-# ╠═10b58953-1625-4a13-a810-65db70e97a1a
-# ╠═f172d5ed-5ed7-42bc-9cfd-851fef43f478
+# ╟─fc4ec6e7-35dd-4afb-8541-f061934d7897
+# ╟─501e35cc-c623-4f55-8db8-5f47bd8021bd
+# ╟─10b58953-1625-4a13-a810-65db70e97a1a
+# ╟─f172d5ed-5ed7-42bc-9cfd-851fef43f478
 # ╠═3d5c39cb-9516-49a1-9591-ade3b8d5157b
+# ╠═d5e6725b-046e-4a50-974e-d138dc4b7e52
 # ╟─59332fe2-25c3-46b1-a8a6-4c0ccfe2bdc2

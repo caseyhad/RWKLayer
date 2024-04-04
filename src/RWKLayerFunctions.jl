@@ -99,25 +99,35 @@ KGNNLayer(num_nodes, num_node_types, num_edge_types, p) = KGNN(
 # normalized random walk layer, output ranges from [0,1]
 function (l::KGNN)(A, X)#::Float32
 
-    nv = size(l.h_adj)[1] # number of vertices
+	#number of vertices in the hidden graph
+    nv = size(l.h_adj)[1]
 
-    adj_reg_mx = Zygote.@ignore upper_triang(nv)|> (isa(l.h_adj, CuArray) ? gpu : cpu) # upper triangle matrix with diag 0
+	#upper triangle matrix with diag 0
+    adj_reg_mx = Zygote.@ignore upper_triang(nv)|> (isa(l.h_adj, CuArray) ? gpu : cpu)
 
+	#store the identity matrix on either the gpu or cpu depending on which is in use
 	id = Matrix{Float32}(I, nv, nv) |> (isa(l.h_adj, CuArray) ? gpu : cpu)
 
-    h_adj_sqr = stack(map(adj -> adj.*adj_reg_mx + (adj.*adj_reg_mx)'.+id, eachslice(l.h_adj, dims = 3))) # make each layer a square matrix by copying its upper triangle to the lower half
+	#make each layer a square matrix by copying its upper triangle to the lower half
+    h_adj_sqr = stack(map(adj -> adj.*adj_reg_mx + (adj.*adj_reg_mx)'.+id, eachslice(l.h_adj, dims = 3)))
     
+	#apply the softmax function to all edge feature vectors
 	h_adj_r = permutedims(softmax(permutedims(h_adj_sqr ,(3,2,1))),(3,2,1))
 
+	#apply the softmax function to all node feature vectors
     h_nf_r = stack(softmax.(eachrow(l.h_nf)))'
 
-    k_xy = sum((vec(X*h_nf_r')*vec(X*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],A[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # random walk kernel calculation between input and hidden
+	#random walk kernel calculation between input graph and hidden graph
+    k_xy = sum((vec(X*h_nf_r')*vec(X*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],A[:,:,i]) for i ∈ 1:l.n_ef]))^l.p)
     
-    k_xx = sum((vec(X*X')*vec(X*X')'.*sum([kron2d(A[:,:,i],A[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # " input and input
+	#random walk between input graph and input graph
+    k_xx = sum((vec(X*X')*vec(X*X')'.*sum([kron2d(A[:,:,i],A[:,:,i]) for i ∈ 1:l.n_ef]))^l.p)
         
-    k_yy = sum((vec(h_nf_r*h_nf_r')*vec(h_nf_r*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],h_adj_r[:,:,i]) for i ∈ 1:l.n_ef]))^l.p) # " hidden and hidden
+	#random walk between hidden graph and hidden graph
+    k_yy = sum((vec(h_nf_r*h_nf_r')*vec(h_nf_r*h_nf_r')'.*sum([kron2d(h_adj_r[:,:,i],h_adj_r[:,:,i]) for i ∈ 1:l.n_ef]))^l.p)
 
-    k_xy/(k_xx*k_yy)^.5 # cosine norm
+	#cosine norm maps the output to the range [0,1]
+    k_xy/(k_xx*k_yy)^.5
 	
 
 end
@@ -205,6 +215,56 @@ function hidden_graph_view(model, graph_number)
 	res = Chain(model.layers[3:end]...)(graph_feature)
 
 	return h_adj_r, h_nf_r, res
+end
+
+function gk_contribution_map(res,G::MetaGraph;dynamic_range = 1::Real)
+	#store the trained model on device being used (gpu or cpu)
+	investigated_model = res.output_model |> device
+
+	#initialize a dict for the appearence counts of the node in graphlets
+	vertex_counts = Dict(zip(vertices(G), zeros(length(vertices(G)))))
+	#initialize a dict for the accumulated probability of the graphlets (that contain v) of being positive class
+	vertex_outcomes = Dict(zip(vertices(G), zeros(length(vertices(G)))))
+
+	#generate each all-connected size-k subgraphs of G
+	graphlets = MolecularGraphKernels.con_sub_g(res.output_model.layers[1][1].p,G)
+
+	#make a vector of graphlets as metagraphs
+	graph_vec = [induced_subgraph(G,graphlet)[1] for graphlet ∈ graphlets]
+
+	#convert to featuredGraphs
+	featuredgraph_vec = mg_to_fg(graph_vec,res.data.labels.edge_labels,res.data.labels.vertex_labels)
+
+	#pass graphlets through the model
+	model_outs = [investigated_model(featuredgraph|>device) for featuredgraph ∈ featuredgraph_vec]|>cpu
+
+	for i ∈ eachindex(model_outs)
+		model_prediction = model_outs[i]
+		#list of vertices in current graphlet
+		vertices_present = graphlets[i]
+		for v ∈ vertices_present
+			vertex_counts[v] +=1
+			#add the prob. of positive class, subract the prob. of the negative class
+			vertex_outcomes[v] += (model_prediction[1]-model_prediction[2])
+			
+		end
+	end
+	for i ∈ eachindex(vertex_outcomes)
+		vertex_outcomes[i] = vertex_outcomes[i]/(vertex_counts[i]*dynamic_range)
+	end
+	return vertex_outcomes
+end
+
+begin
+	function viz_node_colors(weights)::Vector{RGBA}
+		wts_vec = -[((weights[i])+1)/2 for i in eachindex(weights)].+1
+	return [RGBA(1-i, 0, i) for i in wts_vec]
+	
+	end
+	function viz_node_colors(g::MetaGraph)
+    	return viz_node_colors(gk_contribution_map(res_med, g, dynamic_range = .462))
+	end
+	
 end
 
 function hg_to_mg(

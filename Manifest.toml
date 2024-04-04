@@ -2,7 +2,7 @@
 
 julia_version = "1.9.1"
 manifest_format = "2.0"
-project_hash = "4b18eba4c3114cb3036982b31c5d34e2d3875930"
+project_hash = "eea56039f8159060ac4fd38823af561cd1b5f6dc"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -1074,12 +1074,10 @@ uuid = "6c89ec66-9cd8-5372-9f91-fabc50dd27fd"
 version = "0.13.0"
 
 [[deps.MolecularGraphKernels]]
-deps = ["Cairo", "Colors", "Combinatorics", "Compose", "Distributed", "GraphPlot", "Graphs", "JLD2", "Memoization", "MetaGraphs", "MolecularGraph", "PeriodicTable", "PrecompileSignatures", "ProgressMeter", "RDKitMinimalLib", "SharedArrays"]
-git-tree-sha1 = "0dd82aad3a567451096ac0fc239b2ce4da4759f6"
-repo-rev = "main"
-repo-url = "https://github.com/caseyhad/MolecularGraphKernels.jl.git"
+deps = ["Cairo", "Colors", "Combinatorics", "Compose", "Distributed", "GraphPlot", "Graphs", "JLD2", "LinearAlgebra", "Memoization", "MetaGraphs", "MolecularGraph", "PeriodicTable", "PrecompileSignatures", "ProgressMeter", "RDKitMinimalLib"]
+git-tree-sha1 = "03587e9d2762d0db12f55db9b2b7193a130ccc73"
 uuid = "bf3818bd-b6bb-4954-8baa-32c32282e633"
-version = "0.9.0"
+version = "0.11.0"
 
 [[deps.MosaicViews]]
 deps = ["MappedArrays", "OffsetArrays", "PaddedViews", "StackViews"]
