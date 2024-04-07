@@ -534,7 +534,8 @@ function train_kgnn(
 	device = gpu,
 	batch_sz = 1,
 	train_portion = 0.80,
-	two_stage = false
+	two_stage = false,
+	oversample = true
 )
 	if length(graph_data)!=length(class_data)
 		error("Graph vector and class vector must be the same size")
@@ -594,12 +595,21 @@ function train_kgnn(
 	training_data = shuffled_data[1:train_set_sz]
 	
 	testing_data = shuffled_data[train_set_sz+1:min(train_set_sz+test_set_sz+1,size(shuffled_data)[1])]
+
 	
 	training_graphs = getindex.(training_data,1)
 	training_classes = getindex.(training_data,2)
 
 	testing_graphs = getindex.(testing_data,1)
 	testing_classes = getindex.(testing_data,2)
+
+	if oversample
+		train_graphs_bal, train_class_bal = collect.(MLUtils.oversample(training_graphs,training_classes))
+	else
+		train_graphs_bal = training_graphs
+		train_class_bal = training_classes
+	end
+	
 
 	if two_stage
 		model1 = make_kgnn(
@@ -613,8 +623,8 @@ function train_kgnn(
 
 
 		losses_fm, trained_model_fm, epoch_test_accuracy_fm, epoch_test_recall_fm = train_model_batch_dist(
-			training_classes, 
-			training_graphs,
+			train_class_bal, 
+			train_graphs_bal,
 			testing_classes,
 			testing_graphs,
 			model1,

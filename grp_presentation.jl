@@ -141,7 +141,7 @@ rwk_kron(g₁,g₂;l=5)
 MolecularGraphKernels.random_walk(ProductGraph{Direct}(g₁, g₂); l=5)
 
 # ╔═╡ 1d6af92f-e334-4c48-aa8a-89dac22db854
-md"### Isomorphism Learning with size 4 graph"
+md"### Autoencoder with size 4 graph"
 
 # ╔═╡ 49b0c3b8-3b9b-47c0-b640-a0c378b1699b
 begin # preparing a small size 4 FeaturedGraph for testing the KGNN layer
@@ -393,12 +393,6 @@ begin
 	viz_graph(g_btx, layout_style = :molecular)
 end
 
-# ╔═╡ 55b299a5-af23-4013-b657-b47a835b631f
-bz = [[1],[2],[3],[4]] |> gpu
-
-# ╔═╡ 4b50a52f-477d-4dcb-b3ea-7c50b41786f8
-vcat(bz...)
-
 # ╔═╡ dcbd4f11-5bf8-4e2e-87e8-8a451020ba20
 md"Is this molecule toxic to honeybees? T/F"
 
@@ -573,7 +567,7 @@ model_scores(pred_classes_bool, true_classes)
 # ╟─426d9a36-c16f-4287-8511-7fd303625718
 # ╠═bcfbc20c-4587-4efa-8173-f032ac9e609a
 # ╠═dc5e40f8-bd39-4769-a524-32144b4fc230
-# ╟─1d6af92f-e334-4c48-aa8a-89dac22db854
+# ╠═1d6af92f-e334-4c48-aa8a-89dac22db854
 # ╠═49b0c3b8-3b9b-47c0-b640-a0c378b1699b
 # ╟─dc37ad80-9e1a-488e-9f9d-6a92e7166d90
 # ╠═74327d26-b4ae-4582-a1b6-2797ed1a0360
@@ -600,8 +594,6 @@ model_scores(pred_classes_bool, true_classes)
 # ╟─2a846906-b2bf-4d65-878a-b5f5db263194
 # ╠═a1257336-376b-451e-b0df-55cc34e78d59
 # ╠═d6e4116a-96e4-41e5-a1fc-814089de711f
-# ╠═55b299a5-af23-4013-b657-b47a835b631f
-# ╠═4b50a52f-477d-4dcb-b3ea-7c50b41786f8
 # ╟─dcbd4f11-5bf8-4e2e-87e8-8a451020ba20
 # ╟─6e808961-0cb5-4843-a893-b9743d1da383
 # ╟─8efec125-9d67-4492-966f-85aed4317d62

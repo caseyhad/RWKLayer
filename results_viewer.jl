@@ -35,8 +35,6 @@ begin #Training Data Preparation
 
 	graph_classes = btx_class_labels[[i ∉[errored_smiles[i][1] for i ∈ 1:length(errored_smiles)] for i in 1:length(btx_class_labels)]]
 
-	btx_mg_bal, btx_class_bal = collect.(MLUtils.oversample(btx_graphs,graph_classes))
-
 end
 
 
@@ -57,7 +55,7 @@ end
 #train_kgnn(btx_graphs,graph_classes, lr = .1, n_epoch = 120, n_hg = 8, batch_sz = 2, p=3, size_hg = 6) - good for feature map for two-stage learning
 #good parameters ^^
 
-res_med = train_kgnn(btx_mg_bal,btx_class_bal, lr = .01, n_epoch = 80, n_hg = 6, batch_sz = 1, p=3, size_hg = 6, two_stage = true)
+res_med = train_kgnn(btx_graphs,graph_classes, lr = .01, n_epoch = 80, n_hg = 8, batch_sz = 1, p=3, size_hg = 6, two_stage = true)
 #res_med = train_kgnn(btx_mg_bal,btx_class_bal, lr = .01, n_epoch = 130, batch_sz = 1, premade_model = res1.output_model, freeze_fm = true)
 
 # for test in 1:3
@@ -84,13 +82,13 @@ jldsave(filename, compress=false; res_med)
 #column_labels = Dict(zip(1:length(res.data.labels.vertex_labels), res.data.labels.vertex_labels))
 #slice_labels = Dict(zip(1:length(res.data.labels.edge_labels), res.data.labels.edge_labels))
 
-# begin
-# 	a = plot(res_med.losses, yaxis="Loss")
-# 	b = twinx(a)
-# 	plot!(b,res_med.epoch_test_accuracy, yaxis = "accuracy", linecolor = "light green")
-# 	plot!(b,res_med.epoch_test_recall, linecolor = "yellow")
-# 	ylims!(b,0, 1)
-# end
+begin
+	a = plot(res_med.losses, yaxis="Loss")
+	b = twinx(a)
+	plot!(b,res_med.epoch_test_accuracy, yaxis = "accuracy", linecolor = "light green")
+	plot!(b,res_med.epoch_test_recall, linecolor = "yellow")
+	ylims!(b,0, 1)
+end
 
 #g = RWKLayerFunctions.hidden_graph2(res.output_model, 1, column_labels, slice_labels, 0.5, .3)
 
